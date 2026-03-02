@@ -82,3 +82,33 @@ class Model:
         cursor.close()
         conn.close()
         return rows[0] if limit == 1 else rows
+    
+    @classmethod
+    def belongs_to(cls, related_model, foreign_key_value: int):
+        """Get parent record by foreign key value"""
+        return related_model.find(foreign_key_value)
+
+    @classmethod
+    def has_many(cls, related_model, foreign_key: str, id: int):
+        """Get child records — e.g. category.has_many(Order, 'category_id', category_id)"""
+        return related_model.where(foreign_key, id)
+    
+    @classmethod
+    def where_like(cls, column: str, value):
+        conn = get_connection()
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute(f"SELECT * FROM {cls.table} WHERE {column} LIKE %s", (f"{value}%",))
+        rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
+        return rows
+    
+    @classmethod
+    def join_query(cls, sql, params=None):
+        conn = get_connection()
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute(sql, params or ())
+        rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
+        return rows
