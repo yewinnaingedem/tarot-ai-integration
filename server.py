@@ -1,20 +1,20 @@
-from mcp.server.fastmcp import FastMCP
+"""
+server.py
+─────────
+Single entry point that runs both:
+  - FastAPI agent host  (REST + WebSocket)
+  - MCP server          (HTTP transport for external clients)
 
-mcp = FastMCP("Tarot-Analyzer", json_response=True)
+Run with:
+    uvicorn server:app --host 0.0.0.0 --port 8000 --reload
+"""
 
-# --- Your Tarot/Sales Tool ---
-@mcp.tool()
-def analyze_sales(csv_path: str) -> str:
-    """Analyzes the tarot sales data for the admin."""
-    # We will add pandas logic here later!
-    return f"Analyzing {csv_path}... Found high demand for 'Love Tarot' readings."
+from mcp_app.agent.host import app
 
-# --- Your Traffic Crash Tool ---
-@mcp.tool()
-def analyze_crashes(csv_path: str) -> str:
-    """Analyzes traffic crash patterns."""
-    return f"Scanning {csv_path}... Identifying hotspots near intersection X."
+from mcp_app.core import mcp
+mcp_http = mcp.http_app(path="/mcp")
+app.mount("/mcp", mcp_http)
 
-# CHANGE THIS LINE:
 if __name__ == "__main__":
-    mcp.run() # Default is stdio, which Askimo prefers
+    import uvicorn
+    uvicorn.run("server:app", host="0.0.0.0", port=8000, reload=True)

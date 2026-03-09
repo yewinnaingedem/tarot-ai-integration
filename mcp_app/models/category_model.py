@@ -6,6 +6,6 @@ class Category(Model):
     @classmethod
     def orders(cls, category_id: int):
         """Get all orders in this category — hasMany"""
-        from .order import Order
+        from .order_model import Order
         return cls.has_many(Order, "package_id", category_id)
     
