@@ -1,27 +1,12 @@
-"""
-mcp_app/agent/host.py
-─────────────────────
-FastAPI agent host — mounts on your existing project.
-
-Endpoints:
-  GET  /health     → check agent + tools status
-  POST /api/chat   → REST (non-streaming)
-  WS   /ws/chat    → WebSocket (streaming, recommended)
-"""
-
+# mcp_app/agent/host.py
 import json
 from contextlib import asynccontextmanager
-
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
+from mcp_app.agent.groq_agent import GroqAgent
 
-from mcp_app.agent.claude_agent import ClaudeAgent
-
-# ─────────────────────────────────────────────
-# Single shared agent instance
-# ─────────────────────────────────────────────
-agent: ClaudeAgent = None
-
+# ── Single shared agent instance ─────────────────────────────
+agent: GroqAgent = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -31,86 +16,57 @@ async def lifespan(app: FastAPI):
     import mcp_app.mcp_tools.order
     import mcp_app.mcp_tools.discount
 
-    agent = ClaudeAgent()
-
-    await agent._get_tools()
-
+    agent = GroqAgent()
+    await agent._connect_mcp()
     yield
 
+    # Cleanup on shutdown
+    await agent.close()
 
 app = FastAPI(title="Tarot AI Agent Host", lifespan=lifespan)
 
-
-# ─────────────────────────────────────────────
-# Health check
-# ─────────────────────────────────────────────
+# ── Health check ──────────────────────────────────────────────
 @app.get("/health")
 async def health():
-    tools = [t["name"] for t in agent._tools] if agent else []
+    tools = [t["function"]["name"] for t in agent._tools] if agent else []
     return JSONResponse({
-        "status": "ok",
+        "status":       "ok",
+        "model":        "groq/llama-3.3-70b-versatile",
         "tools_loaded": len(tools),
-        "tools": tools,
+        "tools":        tools,
     })
 
-
-# ─────────────────────────────────────────────
-# REST endpoint (non-streaming)
-# ─────────────────────────────────────────────
+# ── REST endpoint ─────────────────────────────────────────────
 @app.post("/api/chat")
 async def rest_chat(body: dict):
-    """
-    Body:  { "message": "...", "history": [{role, content}] }
-    Returns: { "response": "..." }
-    """
-    message: str       = body.get("message", "").strip()
+    message: str        = body.get("message", "").strip()
     history: list[dict] = body.get("history", [])
 
     if not message:
-        return JSONResponse({"error": "message is required"}, status_code=400)
+        return JSONResponse({"error": "message required"}, status_code=400)
 
-    conversation = history + [{"role": "user", "content": message}]
+    response = await agent.chat(message, history)
+    return JSONResponse({"response": response})
 
-    full_response = ""
-    async for chunk in agent.stream(conversation):
-        full_response += chunk
-
-    return JSONResponse({"response": full_response})
-
-
-# ─────────────────────────────────────────────
-# WebSocket endpoint (streaming)
-# ─────────────────────────────────────────────
+# ── WebSocket endpoint ────────────────────────────────────────
 @app.websocket("/ws/chat")
 async def ws_chat(websocket: WebSocket):
-    """
-    Client sends: { "message": "...", "history": [{role, content}] }
-    Server sends chunks: { "type": "chunk", "text": "..." }
-    Server sends done:   { "type": "done" }
-    Server sends error:  { "type": "error", "text": "..." }
-    """
     await websocket.accept()
-
     try:
         while True:
-            raw  = await websocket.receive_text()
-            data = json.loads(raw)
-
-            message: str        = data.get("message", "").strip()
-            history: list[dict] = data.get("history", [])
+            raw     = await websocket.receive_text()
+            data    = json.loads(raw)
+            message = data.get("message", "").strip()
+            history = data.get("history", [])
 
             if not message:
                 continue
 
-            conversation = history + [{"role": "user", "content": message}]
-
-            async for chunk in agent.stream(conversation):
-                await websocket.send_text(json.dumps({
-                    "type": "chunk",
-                    "text": chunk,
-                }))
-
-            await websocket.send_text(json.dumps({"type": "done"}))
+            response = await agent.chat(message, history)
+            await websocket.send_text(json.dumps({
+                "type": "done",
+                "text": response,
+            }))
 
     except WebSocketDisconnect:
         pass

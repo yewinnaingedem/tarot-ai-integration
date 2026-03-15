@@ -515,7 +515,230 @@ def get_ai_sales_suggestions() -> dict:
             "conversion_rate": f"{conv_rate}%",
         },
         "top_packages":  [{"name": p["name"], "category": p["cat"], "orders": p["cnt"], "conversion": f"{p['conv']}%", "revenue": _fmt_mmk(p["rev"])} for p in top_pkgs],
-        "weak_packages": [{"name": p["name"], "category": p["cat"], "conversion": f"{p['conv']}%", "price": _fmt_mmk(p["price"] or 0)} for p in weak_pkgs],
+        "weak_packages": [{"name": p["name"], "category": p["cat"], "conversion": f"{p['conv']}%", "price": _fmt_mmk(p["amount"] or 0)} for p in weak_pkgs],
         "best_days":     [{"day": d["day_name"], "revenue": _fmt_mmk(d["revenue"])} for d in best_days],
         "suggestions":   suggestions,
+    }
+
+@mcp.tool()
+def get_holiday_sales_analysis() -> dict:
+    """
+    Analyze sales performance during past holidays and
+    predict/prepare for upcoming holidays.
+
+    ⚠️ Use when admin asks:
+    - holiday sales analysis
+    - how was Thingyan sales last year
+    - prepare for upcoming holiday
+    - holiday marketing strategy
+    """
+    today    = datetime.now().date()
+    upcoming = get_upcoming_holidays(days_ahead=90)
+
+    # ── Analyze past holiday periods ──────────────────────────
+    holiday_analysis = []
+
+    for key, period in HOLIDAY_PERIODS.items():
+        if period["end"] >= today:
+            continue  # skip future periods
+
+        pre_start = period["pre_start"]
+        start     = period["start"]
+        end       = period["end"]
+        post_end  = end + timedelta(days=7)
+
+        # Pre-holiday sales
+        pre = _query("""
+            SELECT COUNT(*) total,
+                   SUM(status='complete') completed,
+                   COALESCE(SUM(CASE WHEN status='complete' THEN total_amount END),0) revenue
+            FROM orders
+            WHERE deleted_at IS NULL
+              AND DATE(created_at) BETWEEN %s AND %s
+        """, (pre_start, start - timedelta(days=1)))
+
+        # During holiday
+        during = _query("""
+            SELECT COUNT(*) total,
+                   SUM(status='complete') completed,
+                   COALESCE(SUM(CASE WHEN status='complete' THEN total_amount END),0) revenue
+            FROM orders
+            WHERE deleted_at IS NULL
+              AND DATE(created_at) BETWEEN %s AND %s
+        """, (start, end))
+
+        # Post-holiday
+        post = _query("""
+            SELECT COUNT(*) total,
+                   SUM(status='complete') completed,
+                   COALESCE(SUM(CASE WHEN status='complete' THEN total_amount END),0) revenue
+            FROM orders
+            WHERE deleted_at IS NULL
+              AND DATE(created_at) BETWEEN %s AND %s
+        """, (end + timedelta(days=1), post_end))
+
+        pre_rev    = int(pre[0]["revenue"]    or 0)
+        during_rev = int(during[0]["revenue"] or 0)
+        post_rev   = int(post[0]["revenue"]   or 0)
+
+        holiday_analysis.append({
+            "holiday":      period["name"],
+            "name_mm":      period["name_mm"],
+            "period":       f"{start} to {end}",
+            "pre_holiday":  {
+                "period":   f"{pre_start} to {start - timedelta(days=1)}",
+                "orders":   int(pre[0]["total"]    or 0),
+                "revenue":  _fmt_mmk(pre_rev),
+            },
+            "during_holiday": {
+                "period":   f"{start} to {end}",
+                "orders":   int(during[0]["total"] or 0),
+                "revenue":  _fmt_mmk(during_rev),
+            },
+            "post_holiday": {
+                "period":   f"{end + timedelta(days=1)} to {post_end}",
+                "orders":   int(post[0]["total"]   or 0),
+                "revenue":  _fmt_mmk(post_rev),
+            },
+            "insight": (
+                "📈 Pre-holiday surge" if pre_rev > during_rev
+                else "🎉 Peak during holiday" if during_rev >= pre_rev and during_rev >= post_rev
+                else "📉 Post-holiday recovery" if post_rev > during_rev
+                else "➡️ Stable across period"
+            ),
+        })
+
+    # ── Upcoming holiday preparation ──────────────────────────
+    preparations = []
+    for h in upcoming[:5]:
+        days_away = h["days_away"]
+        htype     = h["type"]
+
+        if days_away <= 30:
+            if htype == "thingyan":
+                preparations.append({
+                    "holiday":      h["name"],
+                    "name_mm":      h["name_mm"],
+                    "date":         h["date"],
+                    "days_away":    days_away,
+                    "urgency":      "🔴 Act Now" if days_away <= 7 else "🟡 Plan Now",
+                    "suggestions":  [
+                        f"Start pre-Thingyan discount {max(1, days_away-7)} days before ({h['date']})",
+                        "Love & Relationship packages sell most during Thingyan",
+                        "Create bundle packages for water festival season",
+                        "Prepare for high order volume — ensure reader availability",
+                        "Send KBZPay push notification to past customers",
+                    ],
+                })
+            elif htype == "festival":
+                preparations.append({
+                    "holiday":      h["name"],
+                    "name_mm":      h["name_mm"],
+                    "date":         h["date"],
+                    "days_away":    days_away,
+                    "urgency":      "🔴 Act Now" if days_away <= 7 else "🟡 Plan Now",
+                    "suggestions":  [
+                        f"Launch holiday discount 5-7 days before {h['name']}",
+                        "Full Moon days are spiritually significant — promote special readings",
+                        "Create limited-time festival packages",
+                    ],
+                })
+            else:
+                preparations.append({
+                    "holiday":      h["name"],
+                    "name_mm":      h["name_mm"],
+                    "date":         h["date"],
+                    "days_away":    days_away,
+                    "urgency":      "🟢 Keep in mind",
+                    "suggestions":  [
+                        f"Consider a small promotion around {h['name']}",
+                        "Monitor order volume — public holidays often boost spiritual interest",
+                    ],
+                })
+
+    return {
+        "today":               today.strftime("%Y-%m-%d"),
+        "upcoming_holidays":   upcoming,
+        "past_holiday_analysis": holiday_analysis,
+        "holiday_preparations":  preparations,
+        "summary": (
+            f"{len(upcoming)} upcoming holidays in next 90 days. "
+            f"Analyzed {len(holiday_analysis)} past holiday periods."
+        ),
+    }
+
+
+@mcp.tool()
+def get_holiday_comparison(holiday_name: str = "thingyan") -> dict:
+    """
+    Compare sales for the same holiday across different years.
+
+    ⚠️ Use when admin asks:
+    - compare Thingyan sales 2024 vs 2025
+    - how did sales change year over year during holiday
+    - was last year better than this year for a holiday
+
+    Args:
+        holiday_name: "thingyan" | "thadingyut" | "tazaungdaing"
+    """
+    # Find all matching holiday periods
+    matching = {
+        k: v for k, v in HOLIDAY_PERIODS.items()
+        if holiday_name.lower() in k.lower()
+    }
+
+    if not matching:
+        return {"error": f"No holiday found matching '{holiday_name}'"}
+
+    results = []
+    for key, period in sorted(matching.items()):
+        rows = _query("""
+            SELECT COUNT(*) total,
+                   SUM(status='complete') completed,
+                   SUM(status='pending')  pending,
+                   COALESCE(SUM(CASE WHEN status='complete' THEN total_amount END),0) revenue,
+                   COUNT(DISTINCT DATE(created_at)) days_active
+            FROM orders
+            WHERE deleted_at IS NULL
+              AND DATE(created_at) BETWEEN %s AND %s
+        """, (period["pre_start"], period["end"]))
+
+        r         = rows[0]
+        total     = int(r["total"]    or 0)
+        completed = int(r["completed"] or 0)
+        revenue   = int(r["revenue"]  or 0)
+        conv      = round(completed / total * 100, 1) if total else 0
+
+        results.append({
+            "year":          period["start"].year,
+            "holiday":       period["name"],
+            "period":        f"{period['pre_start']} → {period['end']}",
+            "total_orders":  total,
+            "completed":     completed,
+            "pending":       int(r["pending"] or 0),
+            "revenue":       _fmt_mmk(revenue),
+            "revenue_raw":   revenue,
+            "conversion":    f"{conv}%",
+        })
+
+    # Year over year comparison
+    yoy = None
+    if len(results) >= 2:
+        curr = results[-1]
+        prev = results[-2]
+        rev_change = curr["revenue_raw"] - prev["revenue_raw"]
+        yoy = {
+            "revenue_change":  _fmt_mmk(abs(rev_change)),
+            "direction":       "📈 Increased" if rev_change > 0 else "📉 Decreased",
+            "order_change":    curr["total_orders"] - prev["total_orders"],
+        }
+
+    return {
+        "holiday":      holiday_name.title(),
+        "years":        results,
+        "year_on_year": yoy,
+        "recommendation": (
+            "Based on historical data, prepare discounts 7 days before the holiday "
+            "and ensure full reader availability during peak days."
+        ) if results else "Not enough data yet.",
     }

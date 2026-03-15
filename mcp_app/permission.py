@@ -1,0 +1,96 @@
+# mcp_app/permission.py
+from mcp_app.db import get_connection
+
+MODEL_TYPE = "App\\Domains\\Auth\\Models\\User"
+
+# ── Session store — keyed by user_id ─────────────────────────
+_sessions: dict = {}
+_current_user_id: int = 0
+
+def set_current_user(user_id: int):
+    global _current_user_id
+    _current_user_id = user_id
+
+def get_current_user() -> int:
+    return _current_user_id
+
+def clear_current_user():
+    global _current_user_id
+    _current_user_id = 0
+
+# ── can() — no args needed, uses current user ─────────────────
+def can(permission: str) -> bool:
+    user_id = _current_user_id
+    if not user_id:
+        return False
+    return _check_permission(user_id, permission)
+
+def has_role(role: str) -> bool:
+    user_id = _current_user_id
+    if not user_id:
+        return False
+    return _check_role(user_id, role)
+
+def is_admin() -> bool:
+    return _check_role(_current_user_id, "Administrator")
+
+# ── DB queries ────────────────────────────────────────────────
+def _check_permission(user_id: int, permission: str) -> bool:
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+
+        # Administrator has all permissions
+        cur.execute("""
+            SELECT COUNT(*) FROM model_has_roles mhr
+            INNER JOIN roles r ON r.id = mhr.role_id
+            WHERE mhr.model_id   = %s
+              AND mhr.model_type = %s
+              AND r.name         = 'Administrator'
+        """, (user_id, MODEL_TYPE))
+        if cur.fetchone()[0]:
+            return True
+
+        # Via role
+        cur.execute("""
+            SELECT COUNT(*)
+            FROM permissions p
+            INNER JOIN role_has_permissions rhp ON rhp.permission_id = p.id
+            INNER JOIN model_has_roles mhr      ON mhr.role_id       = rhp.role_id
+            WHERE mhr.model_id   = %s
+              AND mhr.model_type = %s
+              AND p.name         = %s
+        """, (user_id, MODEL_TYPE, permission))
+        if cur.fetchone()[0]:
+            return True
+
+        # Direct
+        cur.execute("""
+            SELECT COUNT(*)
+            FROM permissions p
+            INNER JOIN model_has_permissions mhp ON mhp.permission_id = p.id
+            WHERE mhp.model_id   = %s
+              AND mhp.model_type = %s
+              AND p.name         = %s
+        """, (user_id, MODEL_TYPE, permission))
+        return bool(cur.fetchone()[0])
+
+    finally:
+        conn.close()
+
+def _check_role(user_id: int, role: str) -> bool:
+    if not user_id:
+        return False
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT COUNT(*) FROM model_has_roles mhr
+            INNER JOIN roles r ON r.id = mhr.role_id
+            WHERE mhr.model_id   = %s
+              AND mhr.model_type = %s
+              AND r.name         = %s
+        """, (user_id, MODEL_TYPE, role))
+        return bool(cur.fetchone()[0])
+    finally:
+        conn.close()
