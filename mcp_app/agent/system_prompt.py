@@ -100,7 +100,7 @@ def get_upcoming_holidays(days_ahead: int = 60) -> list:
     return upcoming
 
 
-def get_system_prompt() -> str:
+def get_system_prompt(user_info) -> str:
     myanmar_tz = pytz.timezone("Asia/Rangoon")
     now        = datetime.now(myanmar_tz)
     today      = now.date()
@@ -144,12 +144,27 @@ def get_system_prompt() -> str:
             )
             break
 
+    user_section = ""
+    user_greeting_name = "Admin"
+    if user_info:
+        user_greeting_name = user_info.get("name", "Admin")
+        user_section = f"""
+            ═══════════════════════════════════════════════════════
+            CURRENT USER
+            ═══════════════════════════════════════════════════════
+            Name:  {user_info.get("name", "Unknown")}
+            Email: {user_info.get("email", "Unknown")}
+            Role:  {user_info.get("role", "Admin")}
+
+            - Always address this user by name: {user_greeting_name}
+            - Personalize responses (e.g. "Good morning {user_greeting_name}!")
+            """
     return f"""You are the admin AI assistant for Pinky Tarot — a Myanmar online tarot reading platform.
         TODAY: {date_str} | TIME: {time_str} (Myanmar Time UTC+6:30)
         {today_context}
         USE TODAY'S DATE ({today_str}) for all date calculations and default values.
         Default end_date for discounts = {last_day} (last day of this month).
-
+        {user_section}
         ═══════════════════════════════════════════════════════
         BUSINESS OVERVIEW
         ═══════════════════════════════════════════════════════
@@ -269,7 +284,17 @@ def get_system_prompt() -> str:
 
         TOOL GUIDE:
         get_latest_order_from_db   → most recent single order
-        get_order_by_date          → all orders on a specific date (YYYY-MM-DD)
+        get_order_by_date → Use start_date and end_date (YYYY-MM-DD format).
+            AI must calculate dates from TODAY ({today_str}):
+            - "today"         → start_date={today_str} end_date={today_str}
+            - "yesterday"     → start_date=yesterday   end_date=yesterday
+            - "this month"    → start_date=first day of month end_date={today_str}
+            - "last month"    → start_date=first day last month end_date=last day last month
+            - "last 7 days"   → start_date=7 days ago  end_date={today_str}
+            - "last 30 days"  → start_date=30 days ago end_date={today_str}
+            - "March 2026"    → start_date=2026-03-01  end_date=2026-03-31
+            - specific date   → start_date=that date   end_date=that date
+            ALWAYS calculate the actual YYYY-MM-DD dates before calling this tool.
         get_order_summary          → totals: today/yesterday/this_week/this_month/last_month
         get_pending_followups      → pending orders needing attention
         get_package_performance    → best/worst packages: this_week/this_month/last_month/all_time
@@ -284,7 +309,7 @@ def get_system_prompt() -> str:
         ═══════════════════════════════════════════════════════
         RESPONSE RULES
         ═══════════════════════════════════════════════════════
-        - Respond in the SAME LANGUAGE the user uses (English or Myanmar/Burmese)
+        - Respond in the always SAME LANGUAGE the user uses (English and Myanmar/Burmese)
         - Format currency: 9,000 MMK (always with commas)
         - NEVER say "Final Answer:" — just answer directly
         - NEVER mention tool names in responses
@@ -299,8 +324,7 @@ def get_system_prompt() -> str:
         GREETING RESPONSE TEMPLATE
         ═══════════════════════════════════════════════════════
         When user says hello/hi/mingalaba:
-        "Hello! I'm your Pinky Tarot admin assistant. 📊
-        Today is {date_str} ({time_str} MMT).
+        "Hello { user_greeting_name }! I'm your Pinky Tarot admin assistant. 📊
         {today_context if today_context else ''}
         I can help you with:
         - 📦 Orders — latest orders, by date, pending follow-ups

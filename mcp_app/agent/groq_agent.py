@@ -2,16 +2,19 @@
 import json, os, asyncio
 from groq import Groq
 from dotenv import load_dotenv
+from ..permission import get_user_info
 
 load_dotenv()
 
 class GroqAgent:
     def __init__(self):
         self.client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-        self.model  = "llama-3.1-8b-instant"  # ← smaller, faster, higher TPM limit
+        self.model         = "llama-3.3-70b-versatile" 
         self._tools  = []
         self._session  = None
         self._stdio_cm = None
+        self._categories_shown  = False
+        self._selected_category = None
 
     async def _connect_mcp(self):
         from mcp import ClientSession, StdioServerParameters
@@ -65,9 +68,7 @@ class GroqAgent:
     # groq_agent.py — update chat() method
     async def chat(self, message: str, history: list = []) -> str:
         from mcp_app.agent.system_prompt import get_system_prompt
-        # ── Fresh system prompt with current date/time ────────────
-        system = get_system_prompt()
-
+        system   = get_system_prompt(get_user_info())
         messages = [{"role": "system", "content": system}]
 
         recent_history = history[-4:] if len(history) > 4 else history
@@ -80,15 +81,38 @@ class GroqAgent:
 
         messages.append({"role": "user", "content": message})
 
+        # ── Smart tool decision ───────────────────────────────────
+        msg_lower = message.lower()
+
         tool_keywords = [
             "order", "discount", "revenue", "sales", "package",
             "pending", "customer", "performance", "trend", "create",
             "deactivate", "show", "list", "get", "fetch", "total",
             "report", "analyze", "best", "worst", "summary", "today",
             "week", "month", "follow", "urgent", "latest", "how many",
-            "how much", "what is", "give me", "check",
+            "how much", "give me", "check", "holiday", "thingyan",
         ]
-        needs_tools = any(kw in message.lower() for kw in tool_keywords)
+
+        # ── Block get_categories if already shown ─────────────────
+        # If categories were shown and user is now asking about packages
+        # → only allow get_packages_by_category
+        package_keywords = ["package", "show package", "which package", "all package", "specific package"]
+        asking_for_packages = any(kw in msg_lower for kw in package_keywords)
+
+        needs_tools = any(kw in msg_lower for kw in tool_keywords)
+
+        # ── Build excluded tools based on state ───────────────────
+        excluded_tools = set()
+        if self._categories_shown and asking_for_packages:
+            # Categories already shown — block get_categories from being called again
+            excluded_tools.add("get_categories")
+            print("🚫 Blocking get_categories — already shown")
+
+        # Filter tools based on exclusions
+        active_tools = [
+            t for t in self._tools
+            if t["function"]["name"] not in excluded_tools
+        ] if needs_tools else None
 
         called_tools   = set()
         max_iterations = 2
@@ -100,10 +124,10 @@ class GroqAgent:
             response = self.client.chat.completions.create(
                 model       = self.model,
                 messages    = messages,
-                tools       = self._tools if needs_tools else None,
-                tool_choice = "auto" if needs_tools else "none",
+                tools       = active_tools,
+                tool_choice = "auto" if active_tools else "none",
                 max_tokens  = 1024,
-                temperature = 0.1,  # ← very low = strict, no hallucination
+                temperature = 0.1,
             )
 
             choice = response.choices[0]
@@ -153,8 +177,33 @@ class GroqAgent:
                     "content":      result,
                 })
 
-            # Force final answer after tools
-            needs_tools = False
+                # ── Track state after get_categories ─────────────
+                if tc.function.name == "get_categories":
+                    self._categories_shown = True  # ← mark as shown
+                    messages.append({
+                        "role":    "user",
+                        "content": (
+                            "Display the complete category list in a clear numbered format "
+                            "showing ID and name. Then ask what discount details they want. "
+                            "Do not call any more tools yet."
+                        )
+                    })
+                    active_tools = None  # stop tool calls this round
+
+                # ── Track state after get_packages_by_category ────
+                if tc.function.name == "get_packages_by_category":
+                    self._categories_shown = False  # ← reset for next discount
+                    messages.append({
+                        "role":    "user",
+                        "content": (
+                            "Show the complete package list with IDs, names and prices. "
+                            "Then ask which packages to discount and what discount details. "
+                            "Do not call any more tools yet."
+                        )
+                    })
+                    active_tools = None
+
+            active_tools = None  # force final answer
 
         return "Please try again."
 

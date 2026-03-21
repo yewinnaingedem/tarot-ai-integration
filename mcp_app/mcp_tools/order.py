@@ -6,6 +6,8 @@ from datetime import datetime, timedelta
 from ..core import mcp
 from ..models.order_model import Order
 from ..db import get_connection
+from ..agent.myanmar_holidays import get_upcoming_holidays , HOLIDAY_PERIODS 
+from ..permission import can
 
 
 # ─────────────────────────────────────────────
@@ -92,6 +94,8 @@ def _period_range(period: str):
 @mcp.tool()
 def get_latest_order_from_db() -> dict:
     """GET LATEST ORDER from Database."""
+    if not can('admin.access.order.view') :
+        return {"message" : "current user do not have access to perform this action" }
     order = Order.get_latest_order_with_category()
     if not order:
         return {"message": "Something wrong"}
@@ -99,28 +103,37 @@ def get_latest_order_from_db() -> dict:
 
 
 @mcp.tool()
-def get_order_by_date(created_at: str) -> dict:
+def get_order_by_date(start_date: str, end_date: str = None) -> dict:
     """
-    GET ORDERS BY DATE from the database.
-    Instructions for AI:
-    - Always summarize total orders and total revenue first
-    - Group orders by status (complete, pending, cancelled)
-    - Highlight any suspicious or testing orders (check remark field)
-    - Format currency with MMK prefix
-    - Present customer info in a readable table format
-    - If promotion_type is not null, mention the promotion used
-    - Date format should be YYYY-MM-DD (example: 2025-01-09)
+    Get orders between two dates.
+    start_date: YYYY-MM-DD (required)
+    end_date: YYYY-MM-DD (optional, defaults to start_date for single day)
     """
-    orders = Order.get_orders_by_date(created_at)
+    print(f"🔍 get_order_by_date called: start={start_date} end={end_date}")
+
+    if not can('admin.access.order'):
+        return {"message": "You don't have permission"}
+
+    if not end_date:
+        end_date = start_date
+
+    try:
+        orders = Order.get_orders_by_date_range(start_date, end_date)
+        print(f"✅ Orders found: {len(orders)}")
+    except Exception as e:
+        print(f"❌ Error in get_orders_by_date_range: {e}")
+        import traceback
+        traceback.print_exc()
+        return {"error": str(e)}
+
     formatted = format_orders(orders)
     return {
-        "date":          created_at,
+        "start_date":    start_date,
+        "end_date":      end_date,
         "total_orders":  len(formatted),
-        "total_revenue": sum(o["pricing"]["total_amount"] for o in formatted),
+        "total_revenue": sum(o["pricing"]["total_amount"] or 0 for o in formatted),
         "orders":        formatted,
     }
-
-
 # ─────────────────────────────────────────────
 # New Tool 1: Order Summary by Period
 # ─────────────────────────────────────────────

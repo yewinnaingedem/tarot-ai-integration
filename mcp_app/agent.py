@@ -1,15 +1,16 @@
-from mcp_app.agent.groq_agent import GroqAgent
+from mcp_app.agent.gemini_agent import GeminiAgent
+# from mcp_app.agent.groq_agent import GroqAgent
 from mcp_app.permission import can
 
 # ── Single shared agent instance ─────────────────────────────
-_agent: GroqAgent = None
+_agent: GeminiAgent = None
 
-async def get_agent() -> GroqAgent:
+async def get_agent() -> GeminiAgent:
     global _agent
     if _agent is None:
         import mcp_app.mcp_tools.order
         import mcp_app.mcp_tools.discount
-        _agent = GroqAgent()
+        _agent = GeminiAgent()
         await _agent._connect_mcp()
     return _agent
 

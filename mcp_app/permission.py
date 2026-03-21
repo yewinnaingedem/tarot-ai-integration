@@ -39,7 +39,6 @@ def _check_permission(user_id: int, permission: str) -> bool:
     conn = get_connection()
     try:
         cur = conn.cursor()
-
         # Administrator has all permissions
         cur.execute("""
             SELECT COUNT(*) FROM model_has_roles mhr
@@ -92,5 +91,25 @@ def _check_role(user_id: int, role: str) -> bool:
               AND r.name         = %s
         """, (user_id, MODEL_TYPE, role))
         return bool(cur.fetchone()[0])
+    finally:
+        conn.close()
+
+def get_user_info() -> dict:
+    """Get current user info from DB"""
+    if not _current_user_id:
+        return {}
+    conn = get_connection()
+    try:
+        cur = conn.cursor(dictionary=True)
+        cur.execute("""
+            SELECT u.name, u.email, r.name as role
+            FROM users u
+            LEFT JOIN model_has_roles mhr ON mhr.model_id = u.id
+                AND mhr.model_type = 'App\\\\Domains\\\\Auth\\\\Models\\\\User'
+            LEFT JOIN roles r ON r.id = mhr.role_id
+            WHERE u.id = %s
+            LIMIT 1
+        """, (_current_user_id,))
+        return cur.fetchone() or {}
     finally:
         conn.close()

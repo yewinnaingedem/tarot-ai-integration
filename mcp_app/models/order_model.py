@@ -31,3 +31,14 @@ class Order(Model):
             cls.ORDER_WITH_PACKAGE_SQL + " WHERE o.created_at LIKE %s",
             (f"{created_at}%",)
         )
+    
+    
+    @classmethod
+    def get_orders_by_date_range(cls, start_date: str, end_date: str):
+        return cls.join_query(
+            cls.ORDER_WITH_PACKAGE_SQL + """
+            WHERE DATE(o.created_at) BETWEEN %s AND %s
+            ORDER BY o.created_at DESC
+            """,
+            (start_date, end_date)
+        )
