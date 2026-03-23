@@ -3,7 +3,7 @@ from typing import Literal, Optional
 from pydantic import BaseModel, Field, field_validator, ConfigDict, model_validator
 from mcp_app.core import mcp
 from mcp_app.repository.discount_repository import DiscountRepository
-from mcp_app.repository.coupon_repository import CategoryRepository
+from mcp_app.repository.category_repository import CouponRepository
 import json
 
 
@@ -92,38 +92,6 @@ class DeactivateDiscountInput(BaseModel):
     )
 
 
-# ─────────────────────────────────────────────
-# Tool 1 — get_categories
-# ─────────────────────────────────────────────
-
-@mcp.tool(
-    name="get_categories",
-    annotations={
-        "title": "Get All Tarot Categories",
-        "readOnlyHint": True,
-        "destructiveHint": False,
-        "idempotentHint": True,
-        "openWorldHint": False,
-    },
-)
-def get_categories() -> str:
-    """
-    Retrieve all tarot reading categories from the database.
-
-    ⚠️  ALWAYS call this tool first whenever the user refers to a category by name
-    (e.g. 'Love Reading', 'Career'). Use the returned `id` when calling create_discount.
-
-    Returns:
-        str: JSON array of categories. Each object contains:
-            - id (int):            Use this as category_id in create_discount
-            - name (str):          Category display name
-            - description (str):   Category description
-    """
-    try:
-        categories = CategoryRepository.get_all()
-        return json.dumps(categories, ensure_ascii=False, indent=2)
-    except Exception as e:
-        return json.dumps({"success": False, "error": str(e)})
 
 
 # ─────────────────────────────────────────────
@@ -140,36 +108,6 @@ def get_categories() -> str:
         "openWorldHint": False,
     },
 )
-def get_packages_by_category(category_id: int) -> str:
-    """
-    Retrieve all packages (sub-products) that belong to a specific category.
-
-    Call this when the user wants to apply a discount to specific packages
-    rather than all packages in a category.
-
-    Args:
-        category_id (int): Category ID from get_categories.
-
-    Returns:
-        str: JSON array of packages. Each object contains:
-            - id (int):    Use this in package_ids when calling create_discount
-            - name (str):  Package display name
-            - price (int): Package price in MMK
-    """
-    try:
-        from mcp_app.models.package_model import Package
-        rows = Package.where("category_id", category_id)
-        packages = [
-            {
-                "id":    row.get("id"),
-                "name":  row.get("name", ""),
-                "price": row.get("price", 0),
-            }
-            for row in rows
-        ]
-        return json.dumps(packages, ensure_ascii=False, indent=2)
-    except Exception as e:
-        return json.dumps({"success": False, "error": str(e)})
 
 
 # ─────────────────────────────────────────────
@@ -228,6 +166,21 @@ def create_discount(params: CreateDiscountInput) -> str:
             - discounts (list):       Full detail of each created discount
     """
     try:
+        if hasattr(params, 'amount'):
+            params.amount = float(params.amount)
+        if hasattr(params, 'category_id') and params.category_id is not None:
+            if str(params.category_id).lower() in ("null", "none", ""):
+                params.category_id = None
+            else:
+                params.category_id = int(params.category_id)
+        if hasattr(params, 'package_ids') and params.package_ids is not None:
+            if isinstance(params.package_ids, str):
+                if params.package_ids.lower() in ("null", "none", "[]", ""):
+                    params.package_ids = None
+                else:
+                    import json as _j
+                    params.package_ids = [int(x) for x in _j.loads(params.package_ids)]
+        
         result = DiscountRepository.create_discount(
             category_id=params.category_id,
             discount_type=params.discount_type,
@@ -238,8 +191,8 @@ def create_discount(params: CreateDiscountInput) -> str:
             package_ids=params.package_ids,
         )
         return json.dumps(result, ensure_ascii=False, indent=2)
-    except Exception as e:
-        return json.dumps({"success": False, "error": str(e)})
+    except (ValueError, TypeError) as e:
+        return json.dumps({"success": False, "error": f"Type error: {e}"})
 
 
 # ─────────────────────────────────────────────

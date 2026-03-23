@@ -3,14 +3,16 @@ from mcp_app.agent.groq_agent import GroqAgent
 from mcp_app.agent.antropic import Anthropic
 from mcp_app.permission import can
 
-_agent: Anthropic  = None
+_agent: GroqAgent  = None
 
-async def get_agent() -> Anthropic:
+async def get_agent() -> GroqAgent:
     global _agent
     if _agent is None:
         import mcp_app.mcp_tools.order
         import mcp_app.mcp_tools.discount
-        _agent = Anthropic()
+        import mcp_app.mcp_tools.coupon
+        import mcp_app.mcp_tools.category
+        _agent = GroqAgent()
         await _agent._connect_mcp()
     return _agent
 

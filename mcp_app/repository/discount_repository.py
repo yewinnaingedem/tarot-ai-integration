@@ -113,30 +113,42 @@ class DiscountRepository:
         package_ids: list[int] | None = None,
         created_user: int = 1,
     ) -> dict:
+        try:
+            if hasattr('amount'):
+                params.amount = float(params.amount)
+            if hasattr(params, 'category_id') and params.category_id is not None:
+                if str(params.category_id).lower() in ("null", "none", ""):
+                    params.category_id = None
+                else:
+                    params.category_id = int(params.category_id)
+            if hasattr(params, 'package_ids') and params.package_ids is not None:
+                if isinstance(params.package_ids, str):
+                    if params.package_ids.lower() in ("null", "none", "[]", ""):
+                        params.package_ids = None
+                    else:
+                        import json as _j
+                        params.package_ids = [int(x) for x in _j.loads(params.package_ids)]
+        except (ValueError, TypeError) as e:
+            return json.dumps({"success": False, "error": f"Type error: {e}"})
 
         # Validate type
         if discount_type not in ("percentage", "amount"):
-            msg = "discount_type must be 'percentage' or 'amount'."
-            return {"success": False, "error": msg}
+            return {"success": False, "error": "discount_type must be 'percentage' or 'amount'."}
 
         if discount_type == "percentage" and not (0 < amount <= 100):
-            msg = "Percentage must be between 1 and 100."
-            return {"success": False, "error": msg}
+            return {"success": False, "error": "Percentage must be between 1 and 100."}
 
         if amount <= 0:
-            msg = "amount must be > 0."
-            return {"success": False, "error": msg}
+            return {"success": False, "error": "amount must be > 0."}
 
         # Validate dates
         try:
             s = datetime.strptime(start_date, "%Y-%m-%d")
-            e = datetime.strptime(end_date, "%Y-%m-%d")
+            e = datetime.strptime(end_date,   "%Y-%m-%d")
             if s >= e:
-                msg = "start_date must be before end_date."
-                return {"success": False, "error": msg}
+                return {"success": False, "error": "start_date must be before end_date."}
         except ValueError as ve:
-            msg = f"Invalid date format: {ve}"
-            return {"success": False, "error": msg}
+            return {"success": False, "error": f"Invalid date format: {ve}"}
 
         # Resolve categories
         try:
@@ -145,61 +157,64 @@ class DiscountRepository:
             else:
                 cat = Category.find(category_id)
                 if not cat:
-                    msg = f"Category ID {category_id} not found."
-                    return {"success": False, "error": msg}
+                    return {"success": False, "error": f"Category ID {category_id} not found."}
                 categories = [cat]
         except Exception as e:
             return {"success": False, "error": f"DB error fetching categories: {e}"}
 
-        # Insert per category
-        created = []
+        # ── Pre-check ALL categories for conflicts first ──────────
+        # Collect conflicts without stopping
+        all_conflicts  = []
+        skipped        = []
+        to_create      = []
+
         for cat in categories:
-            cat_id = cat["id"]
+            cat_id   = cat["id"]
             cat_name = cat.get("name", str(cat_id))
 
+            # Get packages
             try:
                 if package_ids is not None:
                     pkg_ids = [str(p) for p in package_ids]
                 else:
-                    pkgs = Package.where("category_id", cat_id)
+                    pkgs    = Package.where("category_id", cat_id)
                     pkg_ids = [str(p["id"]) for p in pkgs]
             except Exception as e:
+                skipped.append({"category": cat_name, "reason": f"Package fetch failed: {e}"})
                 continue
 
             if not pkg_ids:
+                skipped.append({"category": cat_name, "reason": "No packages found"})
                 continue
 
-            # ── Date overlap check ─────────────────────────────────────────
+            # Check date overlap
             try:
                 conflict = DiscountRepository._check_date_overlap(cat_id, start_date, end_date)
                 if conflict:
-                    existing_dates = DiscountRepository.get_available_dates(cat_id)
-                    booked = [
-                        f"#{d['discount_id']} '{d['title']}': {d['start_date'][:10]} to {d['end_date'][:10]}"
-                        for d in existing_dates
-                    ]
-                    return {
-                        "success": False,
-                        "error": "date_overlap",
-                        "message": (
-                            f"Category '{cat_name}' already has a discount "
-                            f"(#{conflict['discount_id']} '{conflict['title']}') "
-                            f"overlapping {start_date} to {end_date}. "
-                            f"Please choose different dates."
-                        ),
-                        "conflicting_discount": conflict,
-                        "all_booked_periods": booked,
-                        "suggestion": (
-                            "Inform the user about the conflict and ask them "
-                            "to pick dates outside the booked periods listed above."
-                        ),
-                    }
+                    all_conflicts.append({
+                        "category_id":   cat_id,
+                        "category_name": cat_name,
+                        "conflict":      conflict,
+                    })
+                    continue  # ← skip this category, don't stop entire operation
             except Exception as e:
-                return {"success": False, "error": f"Overlap check failed: {e}"}
+                skipped.append({"category": cat_name, "reason": f"Overlap check failed: {e}"})
+                continue
 
+            to_create.append({
+                "cat_id":   cat_id,
+                "cat_name": cat_name,
+                "pkg_ids":  pkg_ids,
+            })
+
+        # ── Create discounts for non-conflicting categories ───────
+        created = []
+        failed  = []
+
+        for item in to_create:
             payload = {
-                "category_id":  cat_id,
-                "package_id":   json.dumps(pkg_ids),
+                "category_id":  item["cat_id"],
+                "package_id":   json.dumps(item["pkg_ids"]),
                 "title":        title,
                 "type":         discount_type,
                 "amount":       amount,
@@ -214,24 +229,44 @@ class DiscountRepository:
                 row = Discount.create(payload)
                 created.append(DiscountRepository._format(row))
             except Exception as e:
-                return {
-                    "success": False,
-                    "error": f"DB insert failed for '{cat_name}': {e}",
-                }
+                failed.append({"category": item["cat_name"], "error": str(e)})
 
-        if not created:
-            msg = "No discounts created — no packages found."
-            return {"success": False, "error": msg}
+        # ── Build result ──────────────────────────────────────────
+        if not created and not all_conflicts:
+            return {"success": False, "error": "No discounts created — no packages found in any category."}
 
         value_str = f"{amount}%" if discount_type == "percentage" else f"{amount:,.0f} MMK"
-        scope = f"category {category_id}" if category_id else "all categories"
+        scope     = f"category {category_id}" if category_id else "all categories"
 
         result = {
-            "success": True,
+            "success":         len(created) > 0,
             "discount_summary": f"Applied {value_str} '{title}' to {scope} ({start_date} → {end_date}).",
-            "created_count": len(created),
-            "discounts": created,
+            "created_count":   len(created),
+            "skipped_count":   len(all_conflicts) + len(skipped),
+            "discounts":       created,
         }
+
+        # Add conflict info if any categories were skipped
+        if all_conflicts:
+            result["conflicts"] = [
+                {
+                    "category":          c["category_name"],
+                    "existing_discount": c["conflict"]["title"],
+                    "period":            f"{c['conflict']['start_date'][:10]} → {c['conflict']['end_date'][:10]}",
+                }
+                for c in all_conflicts
+            ]
+            result["conflict_message"] = (
+                f"{len(all_conflicts)} categories skipped due to existing discounts. "
+                f"{len(created)} categories created successfully."
+            )
+
+        if skipped:
+            result["skipped"] = skipped
+
+        if failed:
+            result["failed"] = failed
+
         return result
 
     @staticmethod

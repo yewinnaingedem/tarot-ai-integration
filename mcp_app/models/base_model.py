@@ -1,4 +1,5 @@
 from mcp_app.db import get_connection
+from datetime import datetime
 
 class Model:
     table = ""  
@@ -54,9 +55,11 @@ class Model:
         conn = get_connection()
         cursor = conn.cursor()
         set_clause = ", ".join([f"{k} = %s" for k in data.keys()])
+        updated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        set_clause += ", updated_at = %s"
         cursor.execute(
             f"UPDATE {cls.table} SET {set_clause} WHERE id = %s",
-            [*data.values(), id]
+            [*data.values(), updated_at , id]
         )
         conn.commit()
         cursor.close()
@@ -67,7 +70,8 @@ class Model:
     def delete(cls, id: int):
         conn = get_connection()
         cursor = conn.cursor()
-        cursor.execute(f"DELETE FROM {cls.table} WHERE id = %s", (id,))
+        deleted_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        cursor.execute( f"UPDATE {cls.table} SET deleted_at = {deleted_at} WHERE id = %s", (id,))
         conn.commit()
         cursor.close()
         conn.close()

@@ -15,6 +15,8 @@ async def lifespan(app: FastAPI):
     # Import tools so they register with FastMCP
     import mcp_app.mcp_tools.order
     import mcp_app.mcp_tools.discount
+    import mcp_app.mcp_tools.category
+    import mcp_app.mcp_tools.coupon
 
     agent = GroqAgent()
     await agent._connect_mcp()

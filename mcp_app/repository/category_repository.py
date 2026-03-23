@@ -1,5 +1,5 @@
 from mcp_app.models.category_model import Category
-
+from datetime import datetime
 
 class CouponRepository:
 
@@ -48,7 +48,7 @@ class CouponRepository:
     # ─────────────────────────────────────────────
 
     @staticmethod
-    def create(name: str, description: str = "") -> dict:
+    def create(name: str, mm_name : str , slug_name : str , description: str = "" , ) -> dict:
         """
         Insert a new category and return the created record.
 
@@ -59,7 +59,16 @@ class CouponRepository:
         Returns:
             Formatted dict of the newly created category.
         """
-        row = Category.create({"name": name, "description": description})
+        created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        update_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        row = Category.create({
+            "name": name, 
+            "description": description , 
+            'mm_name' : mm_name , 
+            'slug' : slug_name , 
+            'created_at' : created_at , 
+            "update_at" : update_at
+        })
         return CouponRepository._format(row)
 
     @staticmethod

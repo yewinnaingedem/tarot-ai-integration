@@ -1,47 +1,7 @@
 # mcp_app/agent/system_prompt.py
 from datetime import datetime, date, timedelta
 import pytz
-
-# ── Myanmar Public Holidays 2025-2026 ─────────────────────────
-MYANMAR_HOLIDAYS = {
-    # 2025
-    date(2025, 1, 4):  {"name": "Independence Day",           "name_mm": "လွတ်လပ်ရေးနေ့",          "type": "public"},
-    date(2025, 2, 12): {"name": "Union Day",                  "name_mm": "ပြည်ထောင်စုနေ့",           "type": "public"},
-    date(2025, 3, 2):  {"name": "Peasants Day",               "name_mm": "တောင်သူလယ်သမားနေ့",        "type": "public"},
-    date(2025, 3, 27): {"name": "Armed Forces Day",           "name_mm": "တပ်မတော်နေ့",              "type": "public"},
-    date(2025, 4, 13): {"name": "Thingyan Water Festival",    "name_mm": "သင်္ကြန်ရေပွဲ",            "type": "thingyan"},
-    date(2025, 4, 14): {"name": "Thingyan Water Festival",    "name_mm": "သင်္ကြန်ရေပွဲ",            "type": "thingyan"},
-    date(2025, 4, 15): {"name": "Thingyan Water Festival",    "name_mm": "သင်္ကြန်ရေပွဲ",            "type": "thingyan"},
-    date(2025, 4, 16): {"name": "Myanmar New Year",           "name_mm": "မြန်မာနှစ်သစ်ကူး",         "type": "thingyan"},
-    date(2025, 4, 17): {"name": "Myanmar New Year Holiday",   "name_mm": "နှစ်သစ်ကူးရုံးပိတ်",       "type": "thingyan"},
-    date(2025, 5, 1):  {"name": "Workers Day",                "name_mm": "အလုပ်သမားနေ့",             "type": "public"},
-    date(2025, 5, 12): {"name": "Kason Full Moon Day",        "name_mm": "ကဆုန်လပြည့်နေ့",           "type": "fullmoon"},
-    date(2025, 7, 19): {"name": "Martyrs Day",                "name_mm": "အာဇာနည်နေ့",              "type": "public"},
-    date(2025, 10, 6): {"name": "Thadingyut Festival",        "name_mm": "သီတင်းကျွတ်",              "type": "festival"},
-    date(2025, 10, 7): {"name": "Thadingyut Holiday",         "name_mm": "သီတင်းကျွတ်ရုံးပိတ်",     "type": "festival"},
-    date(2025, 10, 8): {"name": "Thadingyut Holiday",         "name_mm": "သီတင်းကျွတ်ရုံးပိတ်",     "type": "festival"},
-    date(2025, 11, 4): {"name": "Tazaungdaing Festival",      "name_mm": "တန်ဆောင်တိုင်နေ့",         "type": "festival"},
-    date(2025, 11, 5): {"name": "Tazaungdaing Holiday",       "name_mm": "တန်ဆောင်တိုင်ရုံးပိတ်",   "type": "festival"},
-    date(2025, 12, 25): {"name": "Christmas Day",             "name_mm": "ခရစ်စမတ်နေ့",             "type": "public"},
-
-    # 2026
-    date(2026, 1, 4):  {"name": "Independence Day",           "name_mm": "လွတ်လပ်ရေးနေ့",          "type": "public"},
-    date(2026, 2, 12): {"name": "Union Day",                  "name_mm": "ပြည်ထောင်စုနေ့",           "type": "public"},
-    date(2026, 3, 2):  {"name": "Peasants Day",               "name_mm": "တောင်သူလယ်သမားနေ့",        "type": "public"},
-    date(2026, 3, 27): {"name": "Armed Forces Day",           "name_mm": "တပ်မတော်နေ့",              "type": "public"},
-    date(2026, 4, 11): {"name": "Thingyan Eve",               "name_mm": "သင်္ကြန်အကြိုနေ့",         "type": "thingyan"},
-    date(2026, 4, 12): {"name": "Thingyan Water Festival",    "name_mm": "သင်္ကြန်ရေပွဲ",            "type": "thingyan"},
-    date(2026, 4, 13): {"name": "Thingyan Water Festival",    "name_mm": "သင်္ကြန်ရေပွဲ",            "type": "thingyan"},
-    date(2026, 4, 14): {"name": "Thingyan Water Festival",    "name_mm": "သင်္ကြန်ရေပွဲ",            "type": "thingyan"},
-    date(2026, 4, 15): {"name": "Thingyan Water Festival",    "name_mm": "သင်္ကြန်ရေပွဲ",            "type": "thingyan"},
-    date(2026, 4, 16): {"name": "Myanmar New Year",           "name_mm": "မြန်မာနှစ်သစ်ကူး",         "type": "thingyan"},
-    date(2026, 4, 17): {"name": "Myanmar New Year Holiday",   "name_mm": "နှစ်သစ်ကူးရုံးပိတ်",       "type": "thingyan"},
-    date(2026, 4, 19): {"name": "Myanmar New Year Holiday",   "name_mm": "နှစ်သစ်ကူးရုံးပိတ်ရက်",   "type": "thingyan"},
-    date(2026, 4, 30): {"name": "Kason Full Moon Day",        "name_mm": "ကဆုန်လပြည့်နေ့",           "type": "fullmoon"},
-    date(2026, 5, 1):  {"name": "Workers Day",                "name_mm": "အလုပ်သမားနေ့",             "type": "public"},
-    date(2026, 7, 19): {"name": "Martyrs Day",                "name_mm": "အာဇာနည်နေ့",              "type": "public"},
-    date(2026, 12, 25): {"name": "Christmas Day",             "name_mm": "ခရစ်စမတ်နေ့",             "type": "public"},
-}
+from ..agent.myanmar_holidays import HOLIDAY_PERIODS , MYANMAR_HOLIDAYS
 
 # ── Holiday sales patterns based on type ─────────────────────
 HOLIDAY_PATTERNS = {
@@ -271,6 +231,20 @@ def get_system_prompt(user_info) -> str:
         - If today IS a holiday         → check if discount is already running
         - Always reference LAST YEAR's same holiday sales when giving advice
 
+        COUPON CREATION WORKFLOW — STRICT ORDER:
+            1. User asks to create coupon
+            2. Call get_categories → show list → ask which category
+            3. If user wants specific packages:
+                Call get_packages_by_category → show packages → ask which ones
+            4. Ask for remaining details:
+                - coupon_type: percentage or amount?
+                - amount: how much?
+                - available_times: how many uses?
+                - start_date / end_date?
+            5. Call create_coupon with all collected info
+            6. System auto-generates PTR code
+            7. Confirm all details to user
+
         {holiday_section}
 
         ═══════════════════════════════════════════════════════
@@ -305,7 +279,27 @@ def get_system_prompt(user_info) -> str:
         create_discount            → create discount (need category_id first)
         get_discounts              → active discounts (filter by category optional)
         deactivate_discount        → turn off a discount by ID
-
+        get_coupons              → list all coupons with stats. active_only: bool
+        get_coupon               → single coupon by ID
+        find_coupon_by_code      → find coupon by code string
+        create_coupon            → create coupon (code auto-generated PTR format)
+        update_coupon            → update coupon fields
+        deactivate_coupon        → disable a coupon
+        get_expiring_coupons     → coupons expiring soon. days: int
+        COUPON CREATION WORKFLOW — STRICT ORDER:
+            1. User asks to create coupon
+            2. Call get_categories → show list → ask which category
+            3. If user wants specific packages:
+            Call get_packages_by_category → show packages → ask which ones
+            4. Ask for remaining details:
+            - coupon_type: percentage or amount?
+            - amount: how much?
+            - available_times: how many uses?
+            - start_date / end_date?
+            - with_discount: can it stack with discounts?
+            5. Call create_coupon with all collected info
+            6. System auto-generates PTR code
+            7. Confirm all details to user
         ═══════════════════════════════════════════════════════
         RESPONSE RULES
         ═══════════════════════════════════════════════════════
@@ -326,13 +320,4 @@ def get_system_prompt(user_info) -> str:
         When user says hello/hi/mingalaba:
         "Hello { user_greeting_name }! I'm your Pinky Tarot admin assistant. 📊
         {today_context if today_context else ''}
-        I can help you with:
-        - 📦 Orders — latest orders, by date, pending follow-ups
-        - 💰 Revenue — today's sales, trends, conversion rates
-        - 🏷️ Discounts — create, view, deactivate promotions
-        - 📊 Packages — performance, best/worst sellers
-        - 💡 AI Suggestions — recommendations to boost revenue
-        - 📅 Holiday Planning — prepare sales strategy for upcoming holidays
-
-        What would you like to check?"
     """
