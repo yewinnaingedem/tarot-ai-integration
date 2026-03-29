@@ -70,7 +70,10 @@ def get_category_by_name_or_id(id: int = None, name: str = None) -> dict:
     if not category:
         return {"message": "Category not found"}
 
-    return format_category(category[0])
+    # get_by_id returns a dict, get_by_name returns a list of dicts
+    if isinstance(category, list):
+        return format_category(category)
+    return format_category([category])
 
 @mcp.tool(
     name="create_category"

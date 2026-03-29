@@ -50,28 +50,38 @@ def _check_permission(user_id: int, permission: str) -> bool:
         if cur.fetchone()[0]:
             return True
 
+        # Build list: exact permission + all parent prefixes
+        # e.g. "admin.access.order.view" → also check "admin.access.order"
+        perms_to_check = [permission]
+        parts = permission.rsplit(".", 1)
+        while len(parts) == 2:
+            perms_to_check.append(parts[0])
+            parts = parts[0].rsplit(".", 1)
+
+        placeholders = ",".join(["%s"] * len(perms_to_check))
+
         # Via role
-        cur.execute("""
+        cur.execute(f"""
             SELECT COUNT(*)
             FROM permissions p
             INNER JOIN role_has_permissions rhp ON rhp.permission_id = p.id
             INNER JOIN model_has_roles mhr      ON mhr.role_id       = rhp.role_id
             WHERE mhr.model_id   = %s
               AND mhr.model_type = %s
-              AND p.name         = %s
-        """, (user_id, MODEL_TYPE, permission))
+              AND p.name IN ({placeholders})
+        """, (user_id, MODEL_TYPE, *perms_to_check))
         if cur.fetchone()[0]:
             return True
 
         # Direct
-        cur.execute("""
+        cur.execute(f"""
             SELECT COUNT(*)
             FROM permissions p
             INNER JOIN model_has_permissions mhp ON mhp.permission_id = p.id
             WHERE mhp.model_id   = %s
               AND mhp.model_type = %s
-              AND p.name         = %s
-        """, (user_id, MODEL_TYPE, permission))
+              AND p.name IN ({placeholders})
+        """, (user_id, MODEL_TYPE, *perms_to_check))
         return bool(cur.fetchone()[0])
 
     finally:
@@ -105,11 +115,11 @@ def get_user_info() -> dict:
             SELECT u.name, u.email, r.name as role
             FROM users u
             LEFT JOIN model_has_roles mhr ON mhr.model_id = u.id
-                AND mhr.model_type = 'App\\\\Domains\\\\Auth\\\\Models\\\\User'
+                AND mhr.model_type = %s
             LEFT JOIN roles r ON r.id = mhr.role_id
             WHERE u.id = %s
             LIMIT 1
-        """, (_current_user_id,))
+        """, (MODEL_TYPE, _current_user_id))
         return cur.fetchone() or {}
     finally:
         conn.close()

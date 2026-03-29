@@ -2,27 +2,44 @@
 from fastapi import WebSocket, WebSocketDisconnect
 from mcp_app.auth import verify_token
 from mcp_app.permission import set_current_user, clear_current_user
-from mcp_app.agent import handle_message
+from mcp_app.agent import handle_message_stream
 from mcp_app.conversation import load_history, append_to_history, clear_history, new_session_history
 from mcp_app.models.chat_session import create_chat_session, store_message
 import asyncio, json
 
+_disconnected = set()  # track closed websocket ids
+
+async def _safe_send(websocket: WebSocket, data: dict):
+    """Send JSON to websocket, silently ignore if already closed."""
+    try:
+        await websocket.send_json(data)
+    except (WebSocketDisconnect, RuntimeError):
+        _disconnected.add(id(websocket))
+
 async def handle_websocket(websocket: WebSocket):
-    await websocket.accept()
+    try:
+        await websocket.accept()
+    except Exception:
+        return
+
+    ws_id      = id(websocket)
     user_id    = None
     session_id = None
-    history    = []       # ← current session history in memory
+    history    = []
     loop       = asyncio.get_event_loop()
 
     try:
         # ── Connect + verify token ────────────────────────────
-        raw   = await asyncio.wait_for(websocket.receive_text(), timeout=10)
+        try:
+            raw = await asyncio.wait_for(websocket.receive_text(), timeout=10)
+        except (WebSocketDisconnect, RuntimeError):
+            return
         data  = json.loads(raw)
         token = data.get("token", "")
 
         user = await loop.run_in_executor(None, verify_token, token)
         if not user:
-            await websocket.send_json({"event": "error", "message": "Unauthorized"})
+            await _safe_send(websocket, {"event": "error", "message": "Unauthorized"})
             await websocket.close(code=4003)
             return
 
@@ -37,7 +54,7 @@ async def handle_websocket(websocket: WebSocket):
         else:
             history = new_session_history()
 
-        await websocket.send_json({
+        await _safe_send(websocket, {
             "event":      "connected",
             "user_id":    user_id,
             "session_id": session_id,
@@ -45,7 +62,10 @@ async def handle_websocket(websocket: WebSocket):
 
         # ── Message loop ──────────────────────────────────────
         while True:
-            raw     = await websocket.receive_text()
+            try:
+                raw = await websocket.receive_text()
+            except (WebSocketDisconnect, RuntimeError):
+                break
             payload = json.loads(raw)
 
             # ── New chat ──────────────────────────────────────
@@ -62,7 +82,7 @@ async def handle_websocket(websocket: WebSocket):
                     None, load_history, session_id
                 )
                 print(f"🔄 Switched to session {session_id} | {len(history)} messages loaded")
-                await websocket.send_json({
+                await _safe_send(websocket, {
                     "event":      "session_switched",
                     "session_id": session_id,
                 })
@@ -75,7 +95,7 @@ async def handle_websocket(websocket: WebSocket):
             if payload.get("session_id"):
                 session_id = int(payload["session_id"])
 
-            await websocket.send_json({"event": "typing"})
+            await _safe_send(websocket, {"event": "typing"})
 
             # ── Auto-create session on first message ──────────
             if not session_id:
@@ -84,7 +104,7 @@ async def handle_websocket(websocket: WebSocket):
                 )
                 history = new_session_history()
                 print(f"✅ New session {session_id} created")
-                await websocket.send_json({
+                await _safe_send(websocket, {
                     "event":      "session_created",
                     "session_id": session_id,
                     "title":      message[:50],
@@ -98,8 +118,26 @@ async def handle_websocket(websocket: WebSocket):
             # ── Append to memory cache ────────────────────────
             append_to_history(session_id, "user", message)
 
-            # ── Pass full history to agent ────────────────────
-            response = await handle_message(message, history)
+            # ── Stream response chunk-by-chunk ────────────────
+            async def send_chunk(text):
+                if ws_id not in _disconnected:
+                    await _safe_send(websocket, {"event": "stream", "content": text})
+
+            async def send_status(text):
+                if ws_id not in _disconnected:
+                    await _safe_send(websocket, {"event": "status", "content": text})
+
+            response = await handle_message_stream(message, history, on_chunk=send_chunk, on_status=send_status)
+
+            # ── Check for pending file download ───────────────
+            from mcp_app.agent import get_agent
+            agent = await get_agent()
+            download = agent._pending_download
+            agent._pending_download = None
+
+            # ── Append report marker to response if report was generated
+            if download:
+                response += f"\n\n[REPORT_DOWNLOAD:{download['filename']}]"
 
             # ── Store response to DB ──────────────────────────
             await loop.run_in_executor(
@@ -109,18 +147,29 @@ async def handle_websocket(websocket: WebSocket):
             # ── Append response to memory cache ──────────────
             append_to_history(session_id, "assistant", response)
 
-            await websocket.send_json({
-                "event":      "message",
+            await _safe_send(websocket, {
+                "event":      "stream_end",
                 "content":    response,
                 "session_id": session_id,
             })
 
+            # ── Send file download if report was generated ────
+            if download:
+                await _safe_send(websocket, {
+                    "event":    "file_download",
+                    "filename": download["filename"],
+                    "data":     download["data"],
+                })
+
     except asyncio.TimeoutError:
-        await websocket.close(code=4008)
+        try:
+            await websocket.close(code=4008)
+        except Exception:
+            pass
     except WebSocketDisconnect:
+        pass
+    finally:
+        _disconnected.discard(ws_id)
         clear_current_user()
-        print(f"🔴 User {user_id} disconnected")
-    except Exception as e:
-        print(f"WS Error: {e}")
-        import traceback
-        traceback.print_exc()
+        if user_id:
+            print(f"🔴 User {user_id} disconnected")

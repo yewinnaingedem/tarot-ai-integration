@@ -21,6 +21,7 @@ def get_packages_by_category(category_id: int) -> str:
     """
     try:
         rows = Package.where("category_id", category_id)
+        
         packages = [
             {
                 "id":    row.get("id"),

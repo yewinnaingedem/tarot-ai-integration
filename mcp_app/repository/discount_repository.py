@@ -113,23 +113,6 @@ class DiscountRepository:
         package_ids: list[int] | None = None,
         created_user: int = 1,
     ) -> dict:
-        try:
-            if hasattr('amount'):
-                params.amount = float(params.amount)
-            if hasattr(params, 'category_id') and params.category_id is not None:
-                if str(params.category_id).lower() in ("null", "none", ""):
-                    params.category_id = None
-                else:
-                    params.category_id = int(params.category_id)
-            if hasattr(params, 'package_ids') and params.package_ids is not None:
-                if isinstance(params.package_ids, str):
-                    if params.package_ids.lower() in ("null", "none", "[]", ""):
-                        params.package_ids = None
-                    else:
-                        import json as _j
-                        params.package_ids = [int(x) for x in _j.loads(params.package_ids)]
-        except (ValueError, TypeError) as e:
-            return json.dumps({"success": False, "error": f"Type error: {e}"})
 
         # Validate type
         if discount_type not in ("percentage", "amount"):

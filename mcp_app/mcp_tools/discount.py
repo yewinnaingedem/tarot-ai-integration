@@ -91,25 +91,6 @@ class DeactivateDiscountInput(BaseModel):
         description="ID of the discount to deactivate. Call get_discounts first to find the ID.",
     )
 
-
-
-
-# ─────────────────────────────────────────────
-# Tool 2 — get_packages_by_category
-# ─────────────────────────────────────────────
-
-@mcp.tool(
-    name="get_packages_by_category",
-    annotations={
-        "title": "Get Packages for a Category",
-        "readOnlyHint": True,
-        "destructiveHint": False,
-        "idempotentHint": True,
-        "openWorldHint": False,
-    },
-)
-
-
 # ─────────────────────────────────────────────
 # Tool 3 — create_discount
 # ─────────────────────────────────────────────

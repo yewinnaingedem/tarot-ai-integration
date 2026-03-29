@@ -9,6 +9,8 @@ from ..db import get_connection
 from ..agent.myanmar_holidays import get_upcoming_holidays , HOLIDAY_PERIODS 
 from ..permission import can
 
+_DENY = {"message": "You don't have permission to view orders."}
+
 
 # ─────────────────────────────────────────────
 # Shared formatter (your existing one)
@@ -52,8 +54,21 @@ def format_orders(orders: list) -> list:
     return formatted
 
 
+from decimal import Decimal
+
 def _fmt_mmk(amount) -> str:
     return f"{int(amount or 0):,} MMK"
+
+
+def _clean_row(row: dict) -> dict:
+    from datetime import date, datetime
+    return {
+        k: (int(v) if isinstance(v, Decimal) and v == int(v) else float(v))
+           if isinstance(v, Decimal)
+           else str(v) if isinstance(v, (date, datetime))
+           else v
+        for k, v in row.items()
+    }
 
 
 def _query(sql: str, params: tuple = ()) -> list[dict]:
@@ -61,7 +76,7 @@ def _query(sql: str, params: tuple = ()) -> list[dict]:
     try:
         cursor = conn.cursor(dictionary=True)
         cursor.execute(sql, params)
-        return cursor.fetchall()
+        return [_clean_row(r) for r in cursor.fetchall()]
     finally:
         conn.close()
 
@@ -90,12 +105,71 @@ def _period_range(period: str):
 
 # ─────────────────────────────────────────────
 # Your existing tools (unchanged)
+@mcp.tool()
+def get_orders_by_ref(order_refs: str) -> dict:
+    """
+    Look up one or more orders by their reference codes.
+    order_refs: comma-separated order refs, e.g. "PKTR-AAIYS,PKTR-AAIYP"
+    """
+    if not can('admin.access.order'):
+        return _DENY
+
+    refs = [r.strip() for r in order_refs.split(",") if r.strip()]
+    if not refs:
+        return {"error": "No order refs provided"}
+
+    # Auto-fix common typos: add PKTR- prefix if missing
+    fixed_refs = []
+    for r in refs:
+        if not r.startswith("PKTR-"):
+            # Try adding PKTR- prefix (e.g. KTR-AAIYS → PKTR-AAIYS)
+            fixed_refs.append("PKTR-" + r.replace("KTR-", "").replace("PTR-", ""))
+        else:
+            fixed_refs.append(r)
+    refs = fixed_refs
+
+    placeholders = ",".join(["%s"] * len(refs))
+    rows = _query(f"""
+        SELECT o.*, p.name AS package_name, p.amount AS package_price,
+               c.name AS category_name,
+               r.id AS reply_id, r.answer AS reply_answer
+        FROM orders o
+        LEFT JOIN packages p ON o.package_id = p.id
+        LEFT JOIN category c ON p.category_id = c.id
+        LEFT JOIN reply r ON r.order_id = o.id AND r.deleted_at IS NULL
+        WHERE o.order_ref IN ({placeholders}) AND o.deleted_at IS NULL
+    """, tuple(refs))
+
+    if not rows:
+        return {"message": "No orders found", "refs": refs}
+
+    orders = []
+    for o in rows:
+        orders.append({
+            "order_ref":     o["order_ref"],
+            "customer":      o["customer_name"],
+            "phone":         o["customer_phone"],
+            "gender":        o.get("customer_gender"),
+            "date_of_birth": o.get("date_of_birth"),
+            "package":       o.get("package_name"),
+            "category":      o.get("category_name"),
+            "amount":        _fmt_mmk(o["total_amount"]),
+            "remark":        (o.get("remark") or "")[:300],
+            "status":        o["status"],
+            "payment_complete": bool(o["payment_complete"]),
+            "replied":       bool(o.get("reply_id")),
+            "reply_answer":  (o.get("reply_answer") or "")[:200] if o.get("reply_id") else None,
+            "created_at":    str(o["created_at"]),
+        })
+    return {"total": len(orders), "orders": orders}
+
+
 # ─────────────────────────────────────────────
 @mcp.tool()
 def get_latest_order_from_db() -> dict:
     """GET LATEST ORDER from Database."""
     if not can('admin.access.order.view') :
-        return {"message" : "current user do not have access to perform this action" }
+        return _DENY
     order = Order.get_latest_order_with_category()
     if not order:
         return {"message": "Something wrong"}
@@ -112,7 +186,7 @@ def get_order_by_date(start_date: str, end_date: str = None) -> dict:
     print(f"🔍 get_order_by_date called: start={start_date} end={end_date}")
 
     if not can('admin.access.order'):
-        return {"message": "You don't have permission"}
+        return _DENY
 
     if not end_date:
         end_date = start_date
@@ -150,6 +224,8 @@ def get_order_summary(period: str = "today") -> dict:
     Args:
         period: "today" | "yesterday" | "this_week" | "this_month" | "last_month"
     """
+    if not can('admin.access.order'):
+        return _DENY
     try:
         start, end, label = _period_range(period)
     except ValueError as e:
@@ -206,6 +282,8 @@ def get_pending_followups(older_than_hours: int = 24) -> dict:
     Args:
         older_than_hours: Show pending orders older than N hours (default 24)
     """
+    if not can('admin.access.order'):
+        return _DENY
     cutoff = datetime.now() - timedelta(hours=older_than_hours)
 
     rows = _query("""
@@ -271,6 +349,8 @@ def get_package_performance(period: str = "this_month") -> dict:
     Args:
         period: "this_week" | "this_month" | "last_month" | "all_time"
     """
+    if not can('admin.access.order'):
+        return _DENY
     if period == "all_time":
         start = datetime(2020, 1, 1)
         label = "All Time"
@@ -343,6 +423,8 @@ def get_revenue_trends(granularity: str = "daily", days: int = 30) -> dict:
         granularity: "daily" | "weekly"
         days:        Number of past days to include (default 30)
     """
+    if not can('admin.access.order'):
+        return _DENY
     start = datetime.now() - timedelta(days=days)
 
     if granularity == "weekly":
@@ -416,6 +498,8 @@ def get_ai_sales_suggestions() -> dict:
     - AI suggestions / advice
     - sales strategy
     """
+    if not can('admin.access.order'):
+        return _DENY
     now        = datetime.now()
     month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     last30      = now - timedelta(days=30)
@@ -545,6 +629,8 @@ def get_holiday_sales_analysis() -> dict:
     - prepare for upcoming holiday
     - holiday marketing strategy
     """
+    if not can('admin.access.order'):
+        return _DENY
     today    = datetime.now().date()
     upcoming = get_upcoming_holidays(days_ahead=90)
 
@@ -694,6 +780,8 @@ def get_holiday_comparison(holiday_name: str = "thingyan") -> dict:
     Args:
         holiday_name: "thingyan" | "thadingyut" | "tazaungdaing"
     """
+    if not can('admin.access.order'):
+        return _DENY
     # Find all matching holiday periods
     matching = {
         k: v for k, v in HOLIDAY_PERIODS.items()
@@ -755,3 +843,243 @@ def get_holiday_comparison(holiday_name: str = "thingyan") -> dict:
             "and ensure full reader availability during peak days."
         ) if results else "Not enough data yet.",
     }
+
+
+# ─────────────────────────────────────────────
+# Paid but unreplied orders — remind admin
+# ─────────────────────────────────────────────
+@mcp.tool()
+def get_unreplied_paid_orders(older_than_hours: int = 0) -> dict:
+    """
+    Get orders where customer already PAID but admin has NOT replied yet.
+    These are the most urgent — customer is waiting for their tarot reading.
+
+    ⚠️ Use when admin asks:
+    - unreplied orders / unanswered orders
+    - who paid but hasn't received answer
+    - remind me to reply / what should I answer
+    - orders I need to respond to
+    - paid but not answered
+
+    Args:
+        older_than_hours: Only show orders older than N hours (default 0 = all unreplied)
+    """
+    if not can('admin.access.order'):
+        return _DENY
+
+    cutoff_clause = ""
+    params = ()
+    if older_than_hours > 0:
+        cutoff = datetime.now() - timedelta(hours=older_than_hours)
+        cutoff_clause = "AND o.created_at <= %s"
+        params = (cutoff,)
+
+    # Accurate totals (no LIMIT)
+    stats = _query(f"""
+        SELECT
+            COUNT(*)                   AS total,
+            COALESCE(SUM(o.total_amount), 0) AS total_amt,
+            SUM(CASE WHEN TIMESTAMPDIFF(HOUR, o.created_at, NOW()) > 72 THEN 1 ELSE 0 END) AS critical,
+            SUM(CASE WHEN TIMESTAMPDIFF(HOUR, o.created_at, NOW()) BETWEEN 49 AND 72 THEN 1 ELSE 0 END) AS urgent
+        FROM orders o
+        LEFT JOIN reply r ON r.order_id = o.id AND r.deleted_at IS NULL
+        WHERE o.payment_complete = 1
+          AND o.deleted_at IS NULL
+          AND r.id IS NULL
+          {cutoff_clause}
+    """, params)
+
+    total_count = stats[0]["total"] if stats else 0
+    total_amt   = stats[0]["total_amt"] if stats else 0
+    critical    = int(stats[0]["critical"] or 0) if stats else 0
+    urgent_cnt  = int(stats[0]["urgent"] or 0) if stats else 0
+
+    if total_count == 0:
+        return {
+            "message": "ငွေလွှဲပြီး မဖြေရသေးတဲ့ order မရှိပါ။ ✅",
+            "total": 0,
+        }
+
+    # Show top 20 oldest (most urgent) with details
+    rows = _query(f"""
+        SELECT
+            o.id, o.order_ref, o.customer_name, o.customer_phone,
+            o.customer_gender, o.date_of_birth,
+            o.total_amount, o.remark, o.created_at, o.payment_received_date,
+            p.name  AS package_name,
+            c.name  AS category_name,
+            TIMESTAMPDIFF(HOUR, o.created_at, NOW()) AS hours_waiting
+        FROM orders o
+        LEFT JOIN packages p ON o.package_id = p.id
+        LEFT JOIN category c ON p.category_id = c.id
+        LEFT JOIN reply r ON r.order_id = o.id AND r.deleted_at IS NULL
+        WHERE o.payment_complete = 1
+          AND o.deleted_at IS NULL
+          AND r.id IS NULL
+          {cutoff_clause}
+        ORDER BY o.created_at ASC
+        LIMIT 20
+    """, params)
+
+    items = []
+    for r in rows:
+        hours = r["hours_waiting"] or 0
+        items.append({
+            "order_id":      r["id"],
+            "order_ref":     r["order_ref"],
+            "customer":      r["customer_name"],
+            "phone":         r["customer_phone"],
+            "gender":        r["customer_gender"],
+            "date_of_birth": r["date_of_birth"],
+            "package":       r["package_name"] or "Unknown",
+            "category":      r["category_name"] or "Unknown",
+            "amount":        _fmt_mmk(r["total_amount"]),
+            "question":      (r["remark"] or "")[:200],
+            "ordered_at":    str(r["created_at"]),
+            "paid_at":       str(r["payment_received_date"]) if r["payment_received_date"] else None,
+            "hours_waiting": hours,
+            "urgency": (
+                "🔴 CRITICAL" if hours > 72 else
+                "🔴 URGENT"   if hours > 48 else
+                "🟡 Follow up" if hours > 24 else
+                "🟢 Recent"
+            ),
+        })
+
+    return {
+        "total":          total_count,
+        "critical_count": critical,
+        "urgent_count":   urgent_cnt,
+        "total_revenue_waiting": _fmt_mmk(total_amt),
+        "showing":        len(items),
+        "summary": (
+            f"ငွေလွှဲပြီး မဖြေရသေးတဲ့ order စုစုပေါင်း {total_count} ခုရှိပါတယ်။ "
+            f"{'🔴 ' + str(critical) + ' ခုက 72 နာရီကျော်နေပါပြီ။ ' if critical else ''}"
+            f"{'⚠️ ' + str(urgent_cnt) + ' ခုက 48 နာရီကျော်နေပါပြီ။' if urgent_cnt else ''}"
+        ),
+        "orders": items,
+    }
+
+
+@mcp.tool()
+def reply_to_order(order_ref: str, answer: str) -> dict:
+    """
+    Reply to a paid pending order. Creates reply record and marks order complete.
+
+    Args:
+        order_ref: The order reference code (e.g. PKTR-AAGYS)
+        answer: The reply text to send to customer
+    """
+    if not can('admin.access.order'):
+        return _DENY
+
+    # Auto-fix common typos
+    if not order_ref.startswith("PKTR-"):
+        order_ref = "PKTR-" + order_ref.replace("KTR-", "").replace("PTR-", "")
+
+    conn = get_connection()
+    try:
+        cur = conn.cursor(dictionary=True)
+
+        cur.execute("""
+            SELECT o.id, o.order_ref, o.customer_name, o.status, o.payment_complete,
+                   r.id AS reply_id
+            FROM orders o
+            LEFT JOIN reply r ON r.order_id = o.id AND r.deleted_at IS NULL
+            WHERE o.order_ref = %s AND o.deleted_at IS NULL
+        """, (order_ref,))
+        order = cur.fetchone()
+
+        if not order:
+            return {"error": f"Order {order_ref} not found"}
+        if order["reply_id"]:
+            return {"error": f"Order {order_ref} already has a reply"}
+        if not order["payment_complete"]:
+            return {"error": f"Order {order_ref} payment not complete yet"}
+        if order["status"] != "pending":
+            return {"error": f"Order {order_ref} status is {order['status']}, not pending"}
+
+        cur.execute(
+            "INSERT INTO reply (order_id, answer, created_at, updated_at) VALUES (%s, %s, NOW(), NOW())",
+            (order["id"], answer),
+        )
+        cur.execute(
+            "UPDATE orders SET status = 'complete', updated_at = NOW() WHERE id = %s",
+            (order["id"],),
+        )
+        conn.commit()
+
+        return {
+            "success": True,
+            "order_ref": order["order_ref"],
+            "customer": order["customer_name"],
+        }
+    except Exception as e:
+        conn.rollback()
+        return {"error": str(e)}
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+def batch_reply_orders(order_refs: str, answer: str) -> dict:
+    """
+    Reply to multiple orders at once with the same answer.
+    Creates reply records and marks all orders as complete.
+
+    Args:
+        order_refs: Comma-separated order refs, e.g. "PKTR-AAHHE,PKTR-AAHKB,PKTR-AAHKI"
+        answer: The reply text to send to all customers
+    """
+    if not can('admin.access.order'):
+        return _DENY
+
+    refs = [r.strip() for r in order_refs.split(",") if r.strip()]
+    if not refs:
+        return {"error": "No order refs provided"}
+
+    # Auto-fix refs
+    refs = ["PKTR-" + r.replace("KTR-", "").replace("PTR-", "") if not r.startswith("PKTR-") else r for r in refs]
+
+    conn = get_connection()
+    try:
+        cur = conn.cursor(dictionary=True)
+        success = []
+        failed = []
+
+        for ref in refs:
+            cur.execute("""
+                SELECT o.id, o.order_ref, o.customer_name, o.payment_complete, o.status,
+                       r.id AS reply_id
+                FROM orders o
+                LEFT JOIN reply r ON r.order_id = o.id AND r.deleted_at IS NULL
+                WHERE o.order_ref = %s AND o.deleted_at IS NULL
+            """, (ref,))
+            order = cur.fetchone()
+
+            if not order:
+                failed.append({"ref": ref, "reason": "not found"})
+            elif order["reply_id"]:
+                failed.append({"ref": ref, "reason": "already replied"})
+            elif not order["payment_complete"]:
+                failed.append({"ref": ref, "reason": "not paid"})
+            else:
+                cur.execute(
+                    "INSERT INTO reply (order_id, answer, created_at, updated_at) VALUES (%s, %s, NOW(), NOW())",
+                    (order["id"], answer),
+                )
+                cur.execute("UPDATE orders SET status='complete', updated_at=NOW() WHERE id=%s", (order["id"],))
+                success.append({"ref": order["order_ref"], "customer": order["customer_name"]})
+
+        conn.commit()
+        return {
+            "success_count": len(success),
+            "failed_count": len(failed),
+            "replied": success,
+            "failed": failed if failed else None,
+        }
+    except Exception as e:
+        conn.rollback()
+        return {"error": str(e)}
+    finally:
+        conn.close()

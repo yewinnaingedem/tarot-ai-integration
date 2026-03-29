@@ -14,21 +14,21 @@ class Order(Model):
 
     @classmethod
     def pending(cls):
-        return cls.join_query(cls.ORDER_WITH_PACKAGE_SQL + " WHERE o.status = %s", ("pending",))
+        return cls.join_query(cls.ORDER_WITH_PACKAGE_SQL + " WHERE o.status = %s AND o.deleted_at IS NULL", ("pending",))
 
     @classmethod
     def completed(cls):
-        return cls.join_query(cls.ORDER_WITH_PACKAGE_SQL + " WHERE o.status = %s", ("completed",))
+        return cls.join_query(cls.ORDER_WITH_PACKAGE_SQL + " WHERE o.status = %s AND o.deleted_at IS NULL", ("completed",))
 
     @classmethod
     def get_latest_order_with_category(cls):
-        rows = cls.join_query(cls.ORDER_WITH_PACKAGE_SQL + " ORDER BY o.created_at DESC LIMIT 1")
+        rows = cls.join_query(cls.ORDER_WITH_PACKAGE_SQL + " WHERE o.deleted_at IS NULL ORDER BY o.created_at DESC LIMIT 1")
         return rows[0] if rows else None
 
     @classmethod
     def get_orders_by_date(cls, created_at):
         return cls.join_query(
-            cls.ORDER_WITH_PACKAGE_SQL + " WHERE o.created_at LIKE %s",
+            cls.ORDER_WITH_PACKAGE_SQL + " WHERE o.created_at LIKE %s AND o.deleted_at IS NULL",
             (f"{created_at}%",)
         )
     
@@ -38,6 +38,7 @@ class Order(Model):
         return cls.join_query(
             cls.ORDER_WITH_PACKAGE_SQL + """
             WHERE DATE(o.created_at) BETWEEN %s AND %s
+            AND o.deleted_at IS NULL
             ORDER BY o.created_at DESC
             """,
             (start_date, end_date)
