@@ -5,6 +5,7 @@ from mcp_app.permission import set_current_user, clear_current_user
 from mcp_app.agent import handle_message_stream
 from mcp_app.conversation import load_history, append_to_history, clear_history, new_session_history
 from mcp_app.models.chat_session import create_chat_session, store_message
+from mcp_app.logger import logger
 import asyncio, json
 
 _disconnected = set()  # track closed websocket ids
@@ -92,8 +93,28 @@ async def handle_websocket(websocket: WebSocket):
             if not message:
                 continue
 
+            # ── Update session_id from payload first ──────────
             if payload.get("session_id"):
                 session_id = int(payload["session_id"])
+
+            # ── Inject last AI plan into confirmation messages ─
+            msg_lower = message.lower()
+            is_confirm = (
+                "အတည်ပြုပြီး" in message
+                or "[confirm_action" in msg_lower
+                or ("confirm" in msg_lower and any(t in msg_lower for t in ["coupon", "discount"]))
+            )
+            original_message = message
+            if is_confirm and session_id:
+                from mcp_app.conversation import _cache
+                cached = _cache.get(session_id, [])
+                last_ai = next(
+                    (h["content"] for h in reversed(cached) if h.get("role") == "assistant"),
+                    None,
+                )
+                if last_ai:
+                    message = f"{last_ai}\n\n{message}"
+                    print(f"💉 Injected AI plan into confirm message for session {session_id}")
 
             await _safe_send(websocket, {"event": "typing"})
 
@@ -112,11 +133,11 @@ async def handle_websocket(websocket: WebSocket):
 
             # ── Store user message to DB ──────────────────────
             await loop.run_in_executor(
-                None, store_message, session_id, user_id, "user", message
+                None, store_message, session_id, user_id, "user", original_message
             )
 
             # ── Append to memory cache ────────────────────────
-            append_to_history(session_id, "user", message)
+            append_to_history(session_id, "user", original_message)
 
             # ── Stream response chunk-by-chunk ────────────────
             async def send_chunk(text):
@@ -127,7 +148,7 @@ async def handle_websocket(websocket: WebSocket):
                 if ws_id not in _disconnected:
                     await _safe_send(websocket, {"event": "status", "content": text})
 
-            response = await handle_message_stream(message, history, on_chunk=send_chunk, on_status=send_status)
+            response = await handle_message_stream(message, history, on_chunk=send_chunk, on_status=send_status, session_id=session_id)
 
             # ── Check for pending file download ───────────────
             from mcp_app.agent import get_agent
@@ -162,12 +183,15 @@ async def handle_websocket(websocket: WebSocket):
                 })
 
     except asyncio.TimeoutError:
+        logger.error(f"WebSocket timeout for user {user_id}")
         try:
             await websocket.close(code=4008)
         except Exception:
             pass
     except WebSocketDisconnect:
         pass
+    except Exception as e:
+        logger.exception(f"Unhandled WebSocket error for user {user_id}: {e}")
     finally:
         _disconnected.discard(ws_id)
         clear_current_user()

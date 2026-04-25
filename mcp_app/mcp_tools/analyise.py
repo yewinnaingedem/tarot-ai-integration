@@ -54,6 +54,37 @@ def _fmt_mmk(amount) -> str:
     return f"{int(amount):,} MMK"
 
 
+def _resolve_period(period: str) -> tuple:
+    """Return (start, end, label) for a named period. end is exclusive."""
+    now = datetime.now()
+    if period == "today":
+        start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        end = now
+        label = "Today"
+    elif period == "yesterday":
+        start = (now - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        end = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        label = "Yesterday"
+    elif period == "this_week":
+        start = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+        end = now
+        label = "This Week"
+    elif period == "this_month":
+        start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        end = now
+        label = "This Month"
+    elif period == "last_month":
+        first_this = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        start = (first_this - timedelta(days=1)).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        end = first_this
+        label = "Last Month"
+    else:
+        start = datetime(2020, 1, 1)
+        end = now
+        label = "All Time"
+    return start, end, label
+
+
 # ─────────────────────────────────────────────────────────────
 # Tool 1: Order Summary
 # ─────────────────────────────────────────────────────────────
@@ -83,7 +114,7 @@ def get_order_summary(period: str = "today") -> str:
         label = "Today"
     elif period == "yesterday":
         start = (now - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-        end   = start.replace(hour=23, minute=59, second=59)
+        end   = now.replace(hour=0, minute=0, second=0, microsecond=0)
         label = "Yesterday"
     elif period == "this_week":
         start = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
@@ -128,13 +159,14 @@ def get_order_summary(period: str = "today") -> str:
         "date_range":        f"{start.strftime('%Y-%m-%d %H:%M')} → {end.strftime('%Y-%m-%d %H:%M')}",
         "total_orders":      total,
         "completed":         completed,
-        "pending":           pending,
+        "pending_all":       pending,
         "cancelled":         cancelled,
         "conversion_rate":   f"{conv_rate}%",
         "revenue":           _fmt_mmk(revenue),
         "revenue_raw":       int(revenue),
         "potential_revenue": _fmt_mmk(potential),
         "lost_from_pending": _fmt_mmk(potential - revenue),
+        "note":              "pending_all includes both paid-unreplied and unpaid orders. Use get_unreplied_paid_orders for paid-but-unreplied count.",
     })
 
 
@@ -186,7 +218,7 @@ def get_pending_followups(older_than_hours: int = 24) -> str:
 
     if not rows:
         return json.dumps({
-            "message":      f"No pending orders older than {older_than_hours} hours. Great job! ✅",
+            "message":      f"No pending orders older than {older_than_hours} hours.",
             "total_pending": 0,
         })
 
@@ -203,7 +235,7 @@ def get_pending_followups(older_than_hours: int = 24) -> str:
             "remark":        r["remark"],
             "created_at":    str(r["created_at"]),
             "hours_waiting": r["hours_waiting"],
-            "urgency":       "🔴 URGENT" if r["hours_waiting"] > 48 else ("🟡 Follow up" if r["hours_waiting"] > 24 else "🟢 Recent"),
+            "urgency":       "URGENT" if r["hours_waiting"] > 48 else ("Follow up" if r["hours_waiting"] > 24 else "Recent"),
         })
 
     return json.dumps({
@@ -220,7 +252,7 @@ def get_pending_followups(older_than_hours: int = 24) -> str:
 # Tool 3: Package Performance
 # ─────────────────────────────────────────────────────────────
 @mcp.tool()
-def get_package_performance(period: str = "this_month") -> str:
+def get_package_performance(period: str = "this_month", category_id: int = None, compare_period: str = None) -> str:
     """
     Get best and worst performing packages by sales volume and revenue.
 
@@ -229,37 +261,36 @@ def get_package_performance(period: str = "this_month") -> str:
     - package performance
     - underperforming packages
     - what to put on discount
+    - specific category's package sales
+    - compare package sales between months
 
     Args:
         period: "this_week" | "this_month" | "last_month" | "all_time"
+        category_id: Optional category ID to filter by. Get IDs from get_categories.
+        compare_period: Optional second period to compare against (e.g. "last_month"). When set, returns both periods side by side with change %.
 
     Returns:
         Ranked list of packages with order count, revenue, and conversion rate.
     """
     if not can('admin.access.order'):
         return json.dumps(_DENY)
-    now = datetime.now()
-    if period == "this_week":
-        start = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
-        label = "This Week"
-    elif period == "this_month":
-        start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-        label = "This Month"
-    elif period == "last_month":
-        first = now.replace(day=1)
-        start = (first - timedelta(days=1)).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-        label = "Last Month"
-    else:
-        start = datetime(2020, 1, 1)
-        label = "All Time"
+    start, end, label = _resolve_period(period)
 
-    rows = _run_query("""
+    params = [start.strftime("%Y-%m-%d %H:%M:%S"), end.strftime("%Y-%m-%d %H:%M:%S")]
+    cat_filter = ""
+    if category_id:
+        cat_filter = "AND p.category_id = %s"
+        params.append(category_id)
+
+    rows = _run_query(f"""
         SELECT
             p.id          AS package_id,
             p.name        AS package_name,
             p.amount      AS package_price,
             c.name        AS category_name,
             COUNT(o.id)   AS total_orders,
+            SUM(CASE WHEN o.payment_complete = 1 THEN 1 ELSE 0 END) AS paid_orders,
+            SUM(CASE WHEN o.payment_complete = 0 THEN 1 ELSE 0 END) AS unpaid_orders,
             SUM(CASE WHEN o.status = 'complete'  THEN 1 ELSE 0 END) AS completed,
             SUM(CASE WHEN o.status = 'pending'   THEN 1 ELSE 0 END) AS pending,
             SUM(CASE WHEN o.status = 'cancelled' THEN 1 ELSE 0 END) AS cancelled,
@@ -268,38 +299,105 @@ def get_package_performance(period: str = "this_month") -> str:
         JOIN packages   p ON o.package_id = p.id
         JOIN category c ON p.category_id = c.id
         WHERE o.deleted_at IS NULL
-          AND o.created_at >= %s
+          AND o.created_at >= %s AND o.created_at < %s
+          {cat_filter}
         GROUP BY p.id, p.name, p.amount, c.name
         ORDER BY completed DESC, revenue DESC
-    """, (start.strftime("%Y-%m-%d %H:%M:%S"),))
+    """, tuple(params))
 
     if not rows:
         return json.dumps({"message": "No order data found for this period."})
 
-    result = []
-    for i, r in enumerate(rows):
-        total     = r["total_orders"] or 0
-        completed = r["completed"] or 0
-        conv_rate = round(completed / total * 100, 1) if total > 0 else 0
-        result.append({
-            "rank":          i + 1,
-            "package":       r["package_name"],
-            "category":      r["category_name"],
-            "price":         _fmt_mmk(r["package_price"] or 0),
-            "total_orders":  total,
-            "completed":     completed,
-            "pending":       r["pending"],
-            "cancelled":     r["cancelled"],
-            "conversion":    f"{conv_rate}%",
-            "revenue":       _fmt_mmk(r["revenue"]),
-            "status":        "🔥 Top Seller" if i < 3 else ("⚠️ Underperforming" if conv_rate < 40 else "✅ Normal"),
+    def _build_packages(rows):
+        result = []
+        for i, r in enumerate(rows):
+            total     = r["total_orders"] or 0
+            completed = r["completed"] or 0
+            conv_rate = round(completed / total * 100, 1) if total > 0 else 0
+            result.append({
+                "rank":          i + 1,
+                "package":       r["package_name"],
+                "package_id":    r["package_id"],
+                "category":      r["category_name"],
+                "price":         _fmt_mmk(r["package_price"] or 0),
+                "total_orders":  total,
+                "paid_orders":   int(r["paid_orders"] or 0),
+                "unpaid_orders": int(r["unpaid_orders"] or 0),
+                "completed":     completed,
+                "cancelled":     r["cancelled"],
+                "conversion":    f"{conv_rate}%",
+                "revenue":       _fmt_mmk(r["revenue"]),
+                "revenue_raw":   int(r["revenue"]),
+            })
+        return result
+
+    current = _build_packages(rows)
+
+    if not compare_period:
+        for p in current:
+            p.pop("revenue_raw", None)
+            p.pop("package_id", None)
+        return json.dumps({
+            "period":   label,
+            "packages": current,
+            "insight":  f"Top package: {current[0]['package']} with {current[0]['completed']} completions. "
+                        f"Lowest: {current[-1]['package']} with {current[-1]['completed']} completions.",
+        })
+
+    # Comparison mode
+    cmp_start, cmp_end, cmp_label = _resolve_period(compare_period)
+    cmp_params = [cmp_start.strftime("%Y-%m-%d %H:%M:%S"), cmp_end.strftime("%Y-%m-%d %H:%M:%S")]
+    if category_id:
+        cmp_params.append(category_id)
+
+    cmp_rows = _run_query(f"""
+        SELECT
+            p.id AS package_id, p.name AS package_name, p.amount AS package_price,
+            c.name AS category_name, COUNT(o.id) AS total_orders,
+            SUM(CASE WHEN o.payment_complete = 1 THEN 1 ELSE 0 END) AS paid_orders,
+            SUM(CASE WHEN o.payment_complete = 0 THEN 1 ELSE 0 END) AS unpaid_orders,
+            SUM(CASE WHEN o.status = 'complete' THEN 1 ELSE 0 END) AS completed,
+            SUM(CASE WHEN o.status = 'pending' THEN 1 ELSE 0 END) AS pending,
+            SUM(CASE WHEN o.status = 'cancelled' THEN 1 ELSE 0 END) AS cancelled,
+            COALESCE(SUM(CASE WHEN o.status = 'complete' THEN o.total_amount ELSE 0 END), 0) AS revenue
+        FROM orders o
+        JOIN packages p ON o.package_id = p.id
+        JOIN category c ON p.category_id = c.id
+        WHERE o.deleted_at IS NULL
+          AND o.created_at >= %s AND o.created_at < %s
+          {cat_filter}
+        GROUP BY p.id, p.name, p.amount, c.name
+        ORDER BY completed DESC, revenue DESC
+    """, tuple(cmp_params))
+
+    cmp_map = {}
+    for r in _build_packages(cmp_rows):
+        cmp_map[r["package_id"]] = r
+
+    comparison = []
+    for p in current:
+        prev = cmp_map.get(p["package_id"], {})
+        prev_orders = prev.get("total_orders", 0)
+        prev_rev = prev.get("revenue_raw", 0)
+        order_change = p["total_orders"] - prev_orders
+        rev_change = p["revenue_raw"] - prev_rev
+        comparison.append({
+            "package":       p["package"],
+            "category":      p["category"],
+            "current_orders": p["total_orders"],
+            "previous_orders": prev_orders,
+            "order_change":  f"{order_change:+d} ({round(order_change/prev_orders*100, 1) if prev_orders else 0:+.1f}%)",
+            "current_revenue": _fmt_mmk(p["revenue_raw"]),
+            "previous_revenue": _fmt_mmk(prev_rev),
+            "revenue_change": f"{_fmt_mmk(rev_change)} ({round(rev_change/prev_rev*100, 1) if prev_rev else 0:+.1f}%)",
+            "current_conversion": p["conversion"],
+            "previous_conversion": prev.get("conversion", "0%"),
         })
 
     return json.dumps({
-        "period":   label,
-        "packages": result,
-        "insight":  f"Top package: {result[0]['package']} with {result[0]['completed']} completions. "
-                    f"Lowest: {result[-1]['package']} with {result[-1]['completed']} completions.",
+        "current_period":  label,
+        "compare_period":  cmp_label,
+        "packages":        comparison,
     })
 
 
@@ -387,7 +485,7 @@ def get_revenue_trends(granularity: str = "daily", days: int = 30) -> str:
     half     = len(revenues) // 2
     first_h  = sum(revenues[:half]) if half else 0
     second_h = sum(revenues[half:]) if half else 0
-    trend    = "📈 Growing" if second_h > first_h else ("📉 Declining" if second_h < first_h else "➡️ Stable")
+    trend    = "Growing" if second_h > first_h else ("Declining" if second_h < first_h else "Stable")
 
     return json.dumps({
         "granularity":   label,
@@ -464,13 +562,17 @@ def get_ai_sales_suggestions() -> str:
         ORDER BY conv ASC LIMIT 5
     """, (last30,))
 
-    # 4. Pending orders value at risk
+    # 4. Unreplied PAID orders (the ones actually needing reply)
     pending = _run_query("""
         SELECT COUNT(*) cnt,
-               COALESCE(SUM(total_amount), 0) total_value,
-               MAX(TIMESTAMPDIFF(HOUR, created_at, NOW())) max_wait_hours
-        FROM orders
-        WHERE status='pending' AND deleted_at IS NULL
+               COALESCE(SUM(o.total_amount), 0) total_value,
+               MAX(TIMESTAMPDIFF(HOUR, o.created_at, NOW())) max_wait_hours
+        FROM orders o
+        LEFT JOIN reply r ON r.order_id = o.id AND r.deleted_at IS NULL
+        WHERE o.status = 'pending'
+          AND o.payment_complete = 1
+          AND o.deleted_at IS NULL
+          AND r.id IS NULL
     """)[0]
 
     # 5. Best performing day of week
@@ -504,19 +606,19 @@ def get_ai_sales_suggestions() -> str:
     pending_val = int(pending["total_value"] or 0)
     if pending_cnt > 0:
         suggestions.append({
-            "priority": "🔴 HIGH",
-            "title":    "Follow Up Pending Orders",
-            "detail":   f"You have {pending_cnt} pending orders worth {_fmt_mmk(pending_val)}. "
+            "priority": "HIGH",
+            "title":    "Reply Unreplied Paid Orders",
+            "detail":   f"You have {pending_cnt} paid orders waiting for a reply, worth {_fmt_mmk(pending_val)}. "
                         f"Oldest has been waiting {pending['max_wait_hours']} hours. "
-                        f"Reach out via phone/Viber to convert them.",
-            "action":   "Use get_pending_followups tool to see the full list and contact customers.",
+                        f"These customers already paid — reply immediately.",
+            "action":   "Use get_unreplied_paid_orders tool to see the full list.",
         })
 
     # Suggestion: discount on weak packages
     if weak_packages:
         pkg_names = ", ".join(p["name"] for p in weak_packages[:3])
         suggestions.append({
-            "priority": "🟡 MEDIUM",
+            "priority": "MEDIUM",
             "title":    "Run Discount on Underperforming Packages",
             "detail":   f"Packages with low conversion (<50%): {pkg_names}. "
                         f"A 15-20% discount could convert fence-sitters.",
@@ -527,7 +629,7 @@ def get_ai_sales_suggestions() -> str:
     if top_packages:
         top = top_packages[0]
         suggestions.append({
-            "priority": "🟢 OPPORTUNITY",
+            "priority": "OPPORTUNITY",
             "title":    "Amplify Top Seller",
             "detail":   f"'{top['name']}' ({top['cat']}) is your best seller with {top['cnt']} orders "
                         f"and {top['conv']}% conversion. Push more traffic to it.",
@@ -538,7 +640,7 @@ def get_ai_sales_suggestions() -> str:
     if best_days:
         day_list = ", ".join(d["day_name"] for d in best_days)
         suggestions.append({
-            "priority": "🟢 OPPORTUNITY",
+            "priority": "OPPORTUNITY",
             "title":    f"Run Promotions on Peak Days",
             "detail":   f"Your highest revenue days are: {day_list}. "
                         f"Schedule flash discounts or social media posts on these days.",
@@ -549,7 +651,7 @@ def get_ai_sales_suggestions() -> str:
     if peak_hours:
         hours = ", ".join(f"{h['hour']}:00" for h in peak_hours)
         suggestions.append({
-            "priority": "🟢 OPPORTUNITY",
+            "priority": "OPPORTUNITY",
             "title":    "Optimize for Peak Hours",
             "detail":   f"Most orders come in around {hours}. "
                         f"Ensure readers are available and response time is fast during these hours.",
@@ -559,7 +661,7 @@ def get_ai_sales_suggestions() -> str:
     # Suggestion: conversion rate warning
     if conv_rate < 60:
         suggestions.append({
-            "priority": "🟡 MEDIUM",
+            "priority": "MEDIUM",
             "title":    "Improve Overall Conversion Rate",
             "detail":   f"Current conversion rate is {conv_rate}%. Target is >70%. "
                         f"Many pending orders may be due to slow response or unclear expectations.",
@@ -571,7 +673,6 @@ def get_ai_sales_suggestions() -> str:
         "month_snapshot": {
             "total_orders":   int(month["total"] or 0),
             "completed":      int(month["completed"] or 0),
-            "pending":        int(month["pending"] or 0),
             "revenue":        _fmt_mmk(month["revenue"] or 0),
             "conversion_rate": f"{conv_rate}%",
         },
@@ -588,7 +689,7 @@ def get_ai_sales_suggestions() -> str:
 # Tool 6: Category-by-Category Analysis
 # ─────────────────────────────────────────────────────────────
 @mcp.tool()
-def get_category_analysis(period: str = "this_month") -> str:
+def get_category_analysis(period: str = "this_month", compare_period: str = None) -> str:
     """
     Analyze sales performance broken down by each category.
 
@@ -597,9 +698,11 @@ def get_category_analysis(period: str = "this_month") -> str:
     - which category sells best / worst
     - category-level revenue or orders
     - breakdown by category
+    - compare categories between months
 
     Args:
         period: "this_week" | "this_month" | "last_month" | "all_time"
+        compare_period: Optional second period to compare against (e.g. "last_month"). Returns both periods with change %.
 
     Returns:
         Per-category stats: orders, revenue, conversion, top package per category.
@@ -607,26 +710,15 @@ def get_category_analysis(period: str = "this_month") -> str:
     if not can('admin.access.order'):
         return json.dumps(_DENY)
 
-    now = datetime.now()
-    if period == "this_week":
-        start = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
-        label = "This Week"
-    elif period == "this_month":
-        start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-        label = "This Month"
-    elif period == "last_month":
-        first = now.replace(day=1)
-        start = (first - timedelta(days=1)).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-        label = "Last Month"
-    else:
-        start = datetime(2020, 1, 1)
-        label = "All Time"
+    start, end, label = _resolve_period(period)
 
     rows = _run_query("""
         SELECT
             c.id                    AS category_id,
             c.name                  AS category_name,
             COUNT(o.id)             AS total_orders,
+            SUM(CASE WHEN o.payment_complete = 1 THEN 1 ELSE 0 END) AS paid_orders,
+            SUM(CASE WHEN o.payment_complete = 0 THEN 1 ELSE 0 END) AS unpaid_orders,
             SUM(o.status = 'complete')  AS completed,
             SUM(o.status = 'pending')   AS pending,
             SUM(o.status = 'cancelled') AS cancelled,
@@ -634,10 +726,10 @@ def get_category_analysis(period: str = "this_month") -> str:
         FROM orders o
         JOIN packages  p ON o.package_id  = p.id
         JOIN category  c ON p.category_id = c.id
-        WHERE o.deleted_at IS NULL AND o.created_at >= %s
+        WHERE o.deleted_at IS NULL AND o.created_at >= %s AND o.created_at < %s
         GROUP BY c.id, c.name
         ORDER BY revenue DESC
-    """, (start.strftime("%Y-%m-%d %H:%M:%S"),))
+    """, (start.strftime("%Y-%m-%d %H:%M:%S"), end.strftime("%Y-%m-%d %H:%M:%S")))
 
     if not rows:
         return json.dumps({"message": "No order data found for this period."})
@@ -651,10 +743,10 @@ def get_category_analysis(period: str = "this_month") -> str:
         FROM orders o
         JOIN packages p ON o.package_id = p.id
         JOIN category c ON p.category_id = c.id
-        WHERE o.deleted_at IS NULL AND o.created_at >= %s
+        WHERE o.deleted_at IS NULL AND o.created_at >= %s AND o.created_at < %s
         GROUP BY c.id, p.id, p.name
         ORDER BY c.id, cnt DESC
-    """, (start.strftime("%Y-%m-%d %H:%M:%S"),))
+    """, (start.strftime("%Y-%m-%d %H:%M:%S"), end.strftime("%Y-%m-%d %H:%M:%S")))
 
     top_map = {}
     for tp in top_pkgs:
@@ -672,21 +764,75 @@ def get_category_analysis(period: str = "this_month") -> str:
         share = round(rev / total_rev * 100, 1) if total_rev else 0
         categories.append({
             "rank":         i + 1,
+            "category_id":  r["category_id"],
             "category":     r["category_name"],
             "total_orders": total,
+            "paid_orders":  int(r["paid_orders"] or 0),
+            "unpaid_orders": int(r["unpaid_orders"] or 0),
             "completed":    completed,
-            "pending":      int(r["pending"] or 0),
             "cancelled":    int(r["cancelled"] or 0),
             "conversion":   f"{conv}%",
             "revenue":      _fmt_mmk(rev),
+            "revenue_raw":  rev,
             "revenue_share": f"{share}%",
             "top_package":  top_map.get(r["category_id"], "N/A"),
         })
 
+    if not compare_period:
+        for c in categories:
+            c.pop("revenue_raw", None)
+            c.pop("category_id", None)
+        return json.dumps({
+            "period":        label,
+            "total_revenue": _fmt_mmk(total_rev),
+            "categories":    categories,
+        })
+
+    # Comparison mode
+    cmp_start, cmp_end, cmp_label = _resolve_period(compare_period)
+    cmp_rows = _run_query("""
+        SELECT
+            c.id AS category_id, c.name AS category_name,
+            COUNT(o.id) AS total_orders,
+            SUM(CASE WHEN o.payment_complete = 1 THEN 1 ELSE 0 END) AS paid_orders,
+            SUM(CASE WHEN o.payment_complete = 0 THEN 1 ELSE 0 END) AS unpaid_orders,
+            SUM(o.status = 'complete') AS completed,
+            COALESCE(SUM(CASE WHEN o.status = 'complete' THEN o.total_amount END), 0) AS revenue
+        FROM orders o
+        JOIN packages p ON o.package_id = p.id
+        JOIN category c ON p.category_id = c.id
+        WHERE o.deleted_at IS NULL AND o.created_at >= %s AND o.created_at < %s
+        GROUP BY c.id, c.name
+    """, (cmp_start.strftime("%Y-%m-%d %H:%M:%S"), cmp_end.strftime("%Y-%m-%d %H:%M:%S")))
+
+    cmp_map = {}
+    for r in cmp_rows:
+        cmp_map[r["category_id"]] = {
+            "total_orders": int(r["total_orders"] or 0),
+            "completed": int(r["completed"] or 0),
+            "revenue": int(r["revenue"] or 0),
+        }
+
+    comparison = []
+    for c in categories:
+        prev = cmp_map.get(c["category_id"], {"total_orders": 0, "completed": 0, "revenue": 0})
+        order_diff = c["total_orders"] - prev["total_orders"]
+        rev_diff = c["revenue_raw"] - prev["revenue"]
+        comparison.append({
+            "category":          c["category"],
+            "current_orders":    c["total_orders"],
+            "previous_orders":   prev["total_orders"],
+            "order_change":      f"{order_diff:+d} ({round(order_diff/prev['total_orders']*100, 1) if prev['total_orders'] else 0:+.1f}%)",
+            "current_revenue":   _fmt_mmk(c["revenue_raw"]),
+            "previous_revenue":  _fmt_mmk(prev["revenue"]),
+            "revenue_change":    f"{_fmt_mmk(rev_diff)} ({round(rev_diff/prev['revenue']*100, 1) if prev['revenue'] else 0:+.1f}%)",
+            "current_conversion": c["conversion"],
+        })
+
     return json.dumps({
-        "period":        label,
-        "total_revenue": _fmt_mmk(total_rev),
-        "categories":    categories,
+        "current_period": label,
+        "compare_period": cmp_label,
+        "categories":     comparison,
     })
 
 
@@ -717,7 +863,7 @@ def get_single_package_analysis(package_name: str, days: int = 30) -> str:
 
     # find matching package
     pkgs = _run_query(
-        "SELECT id, name, price FROM packages WHERE name LIKE %s LIMIT 5",
+        "SELECT id, name, amount AS price FROM packages WHERE name LIKE %s LIMIT 5",
         (f"%{package_name}%",),
     )
     if not pkgs:
@@ -766,7 +912,6 @@ def get_single_package_analysis(package_name: str, days: int = 30) -> str:
         "summary": {
             "total_orders": total,
             "completed":    completed,
-            "pending":      int(summary["pending"] or 0),
             "cancelled":    int(summary["cancelled"] or 0),
             "conversion":   f"{conv}%",
             "revenue":      _fmt_mmk(summary["revenue"] or 0),
@@ -774,4 +919,419 @@ def get_single_package_analysis(package_name: str, days: int = 30) -> str:
         "daily_trend": [{"day": str(d["day"]), "orders": d["orders"], "revenue": _fmt_mmk(d["revenue"])} for d in daily],
         "recent_customers": [{"name": c["customer_name"], "phone": c["customer_phone"], "status": c["status"], "amount": _fmt_mmk(c["total_amount"]), "date": str(c["created_at"])} for c in customers],
         "other_matches": [p["name"] for p in pkgs[1:]] if len(pkgs) > 1 else [],
+    })
+
+
+# ─────────────────────────────────────────────────────────────
+# Tool 8: Reply Performance
+# ─────────────────────────────────────────────────────────────
+@mcp.tool()
+def get_reply_performance(period: str = "this_month") -> str:
+    """
+    Analyze reply speed and response time by category.
+
+    ⚠️ ALWAYS use this tool when admin asks about:
+    - how fast orders are being replied
+    - reply time / response time
+    - which category is slowest to reply
+    - average reply hours
+
+    Args:
+        period: "this_month" | "last_month" | "all_time"
+
+    Returns:
+        Average reply time per category, slowest/fastest, and orders still unreplied.
+    """
+    if not can('admin.access.order'):
+        return json.dumps(_DENY)
+
+    start, end, label = _resolve_period(period)
+
+    rows = _run_query("""
+        SELECT
+            c.name                                                          AS category,
+            COUNT(r.id)                                                     AS replied_count,
+            ROUND(AVG(TIMESTAMPDIFF(HOUR, o.created_at, r.created_at)), 1) AS avg_hours,
+            MIN(TIMESTAMPDIFF(HOUR, o.created_at, r.created_at))           AS min_hours,
+            MAX(TIMESTAMPDIFF(HOUR, o.created_at, r.created_at))           AS max_hours
+        FROM reply r
+        JOIN orders  o ON o.id  = r.order_id
+        JOIN packages p ON p.id = o.package_id
+        JOIN category c ON c.id = p.category_id
+        WHERE o.deleted_at IS NULL
+          AND r.created_at >= %s AND r.created_at < %s
+        GROUP BY c.id, c.name
+        ORDER BY avg_hours ASC
+    """, (start.strftime("%Y-%m-%d %H:%M:%S"), end.strftime("%Y-%m-%d %H:%M:%S")))
+
+    # Unreplied paid orders count
+    unreplied = _run_query("""
+        SELECT COUNT(*) AS cnt,
+               COALESCE(SUM(o.total_amount), 0) AS value
+        FROM orders o
+        LEFT JOIN reply r ON r.order_id = o.id
+        WHERE o.deleted_at IS NULL
+          AND o.payment_complete = 1
+          AND r.id IS NULL
+          AND o.created_at >= %s AND o.created_at < %s
+    """, (start.strftime("%Y-%m-%d %H:%M:%S"), end.strftime("%Y-%m-%d %H:%M:%S")))[0]
+
+    categories = []
+    for r in rows:
+        avg = float(r["avg_hours"] or 0)
+        categories.append({
+            "category":     r["category"],
+            "replied":      r["replied_count"],
+            "avg_hours":    avg,
+            "avg_display":  f"{int(avg // 24)}d {int(avg % 24)}h" if avg >= 24 else f"{avg}h",
+            "min_hours":    r["min_hours"],
+            "max_hours":    r["max_hours"],
+            "rating":       "Fast" if avg < 48 else ("OK" if avg < 96 else "Slow"),
+        })
+
+    return json.dumps({
+        "period":           label,
+        "categories":       categories,
+        "unreplied_paid":   int(unreplied["cnt"] or 0),
+        "unreplied_value":  _fmt_mmk(unreplied["value"] or 0),
+        "insight":          f"Slowest: {categories[-1]['category']} ({categories[-1]['avg_display']}). "
+                            f"Fastest: {categories[0]['category']} ({categories[0]['avg_display']})."
+                            if categories else "",
+    })
+
+
+# ─────────────────────────────────────────────────────────────
+# Tool 9: Repeat Customer Analysis
+# ─────────────────────────────────────────────────────────────
+@mcp.tool()
+def get_repeat_customers(min_orders: int = 2, limit: int = 20) -> str:
+    """
+    Find loyal repeat customers and their spending patterns.
+
+    ⚠️ ALWAYS use this tool when admin asks about:
+    - loyal customers / repeat buyers
+    - who orders most
+    - customer retention
+    - VIP customers
+
+    Args:
+        min_orders: Minimum order count to qualify (default 2)
+        limit:      Max customers to return (default 20)
+
+    Returns:
+        List of repeat customers with order count, total spent, and favorite category.
+    """
+    if not can('admin.access.order'):
+        return json.dumps(_DENY)
+
+    rows = _run_query("""
+        SELECT
+            o.customer_name,
+            o.customer_phone,
+            COUNT(o.id)                                                          AS total_orders,
+            SUM(CASE WHEN o.status = 'complete' THEN 1 ELSE 0 END)              AS completed,
+            COALESCE(SUM(CASE WHEN o.status = 'complete' THEN o.total_amount END), 0) AS total_spent,
+            MAX(o.created_at)                                                    AS last_order,
+            MIN(o.created_at)                                                    AS first_order
+        FROM orders o
+        WHERE o.deleted_at IS NULL AND o.customer_phone IS NOT NULL
+        GROUP BY o.customer_phone, o.customer_name
+        HAVING total_orders >= %s
+        ORDER BY total_orders DESC, total_spent DESC
+        LIMIT %s
+    """, (min_orders, limit))
+
+    if not rows:
+        return json.dumps({"message": f"No customers with {min_orders}+ orders found."})
+
+    customers = []
+    for r in rows:
+        customers.append({
+            "name":         r["customer_name"],
+            "phone":        r["customer_phone"],
+            "total_orders": r["total_orders"],
+            "completed":    r["completed"],
+            "total_spent":  _fmt_mmk(r["total_spent"] or 0),
+            "last_order":   str(r["last_order"])[:10] if r["last_order"] else None,
+            "first_order":  str(r["first_order"])[:10] if r["first_order"] else None,
+        })
+
+    total_repeat = _run_query("""
+        SELECT COUNT(*) AS cnt FROM (
+            SELECT customer_phone FROM orders
+            WHERE deleted_at IS NULL AND customer_phone IS NOT NULL
+            GROUP BY customer_phone HAVING COUNT(*) >= %s
+        ) t
+    """, (min_orders,))[0]
+
+    return json.dumps({
+        "min_orders":      min_orders,
+        "total_repeat_customers": int(total_repeat["cnt"] or 0),
+        "showing":         len(customers),
+        "customers":       customers,
+    })
+
+
+# ─────────────────────────────────────────────────────────────
+# Tool 10: Promotion Effectiveness
+# ─────────────────────────────────────────────────────────────
+@mcp.tool()
+def get_promotion_effectiveness(period: str = "this_month") -> str:
+    """
+    Compare revenue and conversion between full-price, discount, and coupon orders.
+
+    ⚠️ ALWAYS use this tool when admin asks about:
+    - are discounts working
+    - coupon vs discount effectiveness
+    - promotion ROI
+    - should we run more discounts
+
+    Args:
+        period: "this_month" | "last_month" | "all_time"
+
+    Returns:
+        Side-by-side comparison of full-price vs discount vs coupon orders.
+    """
+    if not can('admin.access.order'):
+        return json.dumps(_DENY)
+
+    start, end, label = _resolve_period(period)
+
+    rows = _run_query("""
+        SELECT
+            COALESCE(promotion_type, 'none')                                    AS promo_type,
+            COUNT(*)                                                             AS total_orders,
+            SUM(CASE WHEN status = 'complete' THEN 1 ELSE 0 END)               AS completed,
+            COALESCE(SUM(CASE WHEN status = 'complete' THEN total_amount END), 0) AS revenue,
+            COALESCE(AVG(CASE WHEN status = 'complete' THEN total_amount END), 0) AS avg_order_value
+        FROM orders
+        WHERE deleted_at IS NULL
+          AND created_at >= %s AND created_at < %s
+        GROUP BY promotion_type
+    """, (start.strftime("%Y-%m-%d %H:%M:%S"), end.strftime("%Y-%m-%d %H:%M:%S")))
+
+    result = {}
+    for r in rows:
+        total = int(r["total_orders"] or 0)
+        completed = int(r["completed"] or 0)
+        conv = round(completed / total * 100, 1) if total else 0
+        result[r["promo_type"]] = {
+            "total_orders":    total,
+            "completed":       completed,
+            "conversion":      f"{conv}%",
+            "revenue":         _fmt_mmk(r["revenue"] or 0),
+            "avg_order_value": _fmt_mmk(r["avg_order_value"] or 0),
+        }
+
+    return json.dumps({
+        "period":     label,
+        "breakdown":  result,
+        "insight":    "Compare conversion rates — higher conversion on discounted orders means promotions are working.",
+    })
+
+
+# ─────────────────────────────────────────────────────────────
+# Tool 11: Holiday Sales Analysis
+# ─────────────────────────────────────────────────────────────
+@mcp.tool()
+def get_holiday_sales_analysis() -> str:
+    """
+    Analyze sales performance around upcoming Myanmar holidays and suggest discount timing.
+    Use when admin asks about holiday strategy, upcoming festivals, or when to run promotions.
+    """
+    if not can('admin.access.order'):
+        return json.dumps(_DENY)
+
+    from mcp_app.agent.myanmar_holidays import MYANMAR_HOLIDAYS, HOLIDAY_PERIODS
+    from datetime import date
+
+    today = datetime.now().date()
+    upcoming = []
+    for h_date, info in sorted(MYANMAR_HOLIDAYS.items()):
+        delta = (h_date - today).days
+        if 0 <= delta <= 60:
+            upcoming.append({"date": str(h_date), "days_away": delta, "name": info["name"], "name_mm": info["name_mm"], "type": info["type"]})
+
+    # Sales around last major holiday (look back 30 days)
+    last30 = datetime.now() - timedelta(days=30)
+    daily = _run_query("""
+        SELECT DATE(created_at) AS day,
+               COUNT(*) AS orders,
+               COALESCE(SUM(CASE WHEN status='complete' THEN total_amount END), 0) AS revenue
+        FROM orders
+        WHERE deleted_at IS NULL AND created_at >= %s
+        GROUP BY DATE(created_at)
+        ORDER BY day ASC
+    """, (last30.strftime("%Y-%m-%d"),))
+
+    peak = max(daily, key=lambda x: x["revenue"]) if daily else {}
+
+    strategies = {
+        "thingyan": "Launch discount 7-10 days before. Love & Relationship packages sell most.",
+        "fullmoon":  "1-day flash discount on Full Moon day. Spiritual packages best.",
+        "festival":  "Discount 5 days before. All categories benefit.",
+        "public":    "Optional small discount on the holiday itself.",
+    }
+
+    return json.dumps({
+        "upcoming_holidays": upcoming,
+        "peak_day_last_30":  {"date": str(peak.get("day", "")), "revenue": _fmt_mmk(peak.get("revenue", 0)), "orders": peak.get("orders", 0)} if peak else None,
+        "strategies":        strategies,
+        "recommendation":    f"Next holiday: {upcoming[0]['name_mm']} in {upcoming[0]['days_away']} days ({upcoming[0]['date']}). Strategy: {strategies.get(upcoming[0]['type'], 'Run a promotion.')}" if upcoming else "No holidays in next 60 days.",
+    })
+
+
+# ─────────────────────────────────────────────────────────────
+# Tool 12: Holiday Comparison
+# ─────────────────────────────────────────────────────────────
+@mcp.tool()
+def get_holiday_comparison() -> str:
+    """
+    Compare sales revenue during holiday periods vs normal periods.
+    Use when admin asks if holidays boost sales or whether promotions during holidays work.
+    """
+    if not can('admin.access.order'):
+        return json.dumps(_DENY)
+
+    from mcp_app.agent.myanmar_holidays import HOLIDAY_PERIODS
+
+    results = []
+    for key, period in list(HOLIDAY_PERIODS.items())[:5]:  # last 5 holiday periods
+        try:
+            start = period["start"]
+            end   = period["end"]
+            # Holiday window
+            holiday_rows = _run_query("""
+                SELECT COUNT(*) AS orders,
+                       COALESCE(SUM(CASE WHEN status='complete' THEN total_amount END), 0) AS revenue,
+                       SUM(status='complete') AS completed
+                FROM orders WHERE deleted_at IS NULL AND created_at BETWEEN %s AND %s
+            """, (start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")))
+
+            # Same duration before holiday
+            duration = (end - start).days or 1
+            pre_start = start - timedelta(days=duration)
+            pre_rows = _run_query("""
+                SELECT COUNT(*) AS orders,
+                       COALESCE(SUM(CASE WHEN status='complete' THEN total_amount END), 0) AS revenue
+                FROM orders WHERE deleted_at IS NULL AND created_at BETWEEN %s AND %s
+            """, (pre_start.strftime("%Y-%m-%d"), start.strftime("%Y-%m-%d")))
+
+            h = holiday_rows[0]
+            p = pre_rows[0]
+            h_rev = int(h["revenue"] or 0)
+            p_rev = int(p["revenue"] or 0)
+            change = round((h_rev - p_rev) / p_rev * 100, 1) if p_rev else 0
+
+            results.append({
+                "holiday":          period.get("name", "Holiday"),
+                "period":           f"{start} → {end}",
+                "holiday_orders":   int(h["orders"] or 0),
+                "holiday_revenue":  _fmt_mmk(h_rev),
+                "pre_period_revenue": _fmt_mmk(p_rev),
+                "revenue_change":   f"{change:+.1f}%",
+                "verdict":          "Boost" if change > 10 else ("Slight boost" if change > 0 else "No boost"),
+            })
+        except Exception:
+            continue
+
+    return json.dumps({
+        "holiday_comparisons": results,
+        "insight": "Periods with >10% revenue increase vs pre-holiday = holidays drive sales.",
+    })
+
+
+# ─────────────────────────────────────────────────────────────
+# Tool: System Reply Count by Date Range
+# ─────────────────────────────────────────────────────────────
+@mcp.tool()
+def get_system_reply_count(
+    start_date: str = None,
+    end_date: str = None,
+    period: str = None,
+    group_by: str = "day",
+) -> str:
+    """
+    Count replied vs not-replied orders by the system for a date range or named period.
+
+    ⚠️ Use this when admin asks:
+    - "How many orders did the system reply today/this week/this month?"
+    - "System reply count from 2025-01-01 to 2025-01-31"
+    - "Show replied and unreplied orders breakdown"
+    - "last 30 days replied orders"
+
+    Args:
+        start_date: YYYY-MM-DD (required if period not given)
+        end_date:   YYYY-MM-DD (required if period not given)
+        period:     "today" | "yesterday" | "this_week" | "this_month" | "last_month" | "last_30_days"
+                    (overrides start_date/end_date if provided)
+        group_by:   "day" | "month" | "week" | "none"  (default: "day")
+
+    Returns:
+        Total orders, replied, not_replied + per-period breakdown.
+    """
+    if not can('admin.access.order'):
+        return json.dumps(_DENY)
+
+    # Resolve period or date range
+    if period == "last_30_days" or (not period and not start_date):
+        now = datetime.now()
+        start_date = (now - timedelta(days=30)).strftime("%Y-%m-%d")
+        end_date   = now.strftime("%Y-%m-%d")
+        label = "Last 30 Days"
+    elif period:
+        start, end, label = _resolve_period(period)
+        start_date = start.strftime("%Y-%m-%d")
+        end_date   = end.strftime("%Y-%m-%d")
+    else:
+        if not end_date:
+            return json.dumps({"error": "Provide 'end_date' or a 'period'."})
+        label = f"{start_date} → {end_date}"
+
+    group_expr = {
+        "day":   "DATE(o.created_at)",
+        "week":  "YEARWEEK(o.created_at, 1)",
+        "month": "DATE_FORMAT(o.created_at, '%Y-%m')",
+        "none":  "'all'",
+    }.get(group_by, "DATE(o.created_at)")
+
+    rows = _run_query(f"""
+        SELECT
+            {group_expr} AS period_group,
+            COUNT(DISTINCT o.id)                                              AS total_orders,
+            COUNT(DISTINCT r.order_id)                                        AS replied,
+            COUNT(DISTINCT o.id) - COUNT(DISTINCT r.order_id)                AS not_replied,
+            ROUND(COUNT(DISTINCT r.order_id) / COUNT(DISTINCT o.id) * 100, 1) AS reply_rate_pct
+        FROM orders o
+        LEFT JOIN reply r ON r.order_id = o.id AND r.deleted_at IS NULL
+        WHERE DATE(o.created_at) BETWEEN %s AND %s
+          AND o.deleted_at IS NULL
+        GROUP BY period_group
+        ORDER BY period_group
+    """, (start_date, end_date))
+
+    total_orders  = sum(int(r["total_orders"]) for r in rows)
+    total_replied = sum(int(r["replied"])       for r in rows)
+    total_not     = total_orders - total_replied
+
+    return json.dumps({
+        "label":         label,
+        "date_range":    f"{start_date} → {end_date}",
+        "group_by":      group_by,
+        "summary": {
+            "total_orders":  total_orders,
+            "replied":       total_replied,
+            "not_replied":   total_not,
+            "reply_rate":    f"{round(total_replied / total_orders * 100, 1) if total_orders else 0}%",
+        },
+        "breakdown": [
+            {
+                "period":       str(r["period_group"]),
+                "total_orders": int(r["total_orders"]),
+                "replied":      int(r["replied"]),
+                "not_replied":  int(r["not_replied"]),
+                "reply_rate":   f"{r['reply_rate_pct']}%",
+            }
+            for r in rows
+        ],
     })

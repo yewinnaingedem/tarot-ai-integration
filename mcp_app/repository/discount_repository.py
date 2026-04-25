@@ -128,8 +128,8 @@ class DiscountRepository:
         try:
             s = datetime.strptime(start_date, "%Y-%m-%d")
             e = datetime.strptime(end_date,   "%Y-%m-%d")
-            if s >= e:
-                return {"success": False, "error": "start_date must be before end_date."}
+            if s > e:
+                return {"success": False, "error": "start_date must not be after end_date."}
         except ValueError as ve:
             return {"success": False, "error": f"Invalid date format: {ve}"}
 

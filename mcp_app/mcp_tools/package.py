@@ -26,7 +26,7 @@ def get_packages_by_category(category_id: int) -> str:
             {
                 "id":    row.get("id"),
                 "name":  row.get("name", ""),
-                "price": row.get("price", 0),
+                "price": row.get("amount", 0),  # DB column is 'amount'
             }
             for row in rows
         ]

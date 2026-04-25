@@ -4,6 +4,13 @@ from ..repository.category_repository import CouponRepository as ctr
 from ..permission import can
 import json
 
+def _fmt_dt(val):
+    if not val:
+        return None
+    if hasattr(val, 'strftime'):
+        return val.strftime("%Y-%m-%d %H:%M")
+    return str(val)[:16]  # already a string, just trim to "YYYY-MM-DD HH:MM"
+
 def format_category( category : list) -> list:
     formatted = []
     for o in category:
@@ -12,8 +19,8 @@ def format_category( category : list) -> list:
             "name" : o.get("name") ,
             "mm_name" : o.get("mm_name"),
             "category_type" : o.get("category_type"),
-            "created_at": o.get("created_at").strftime("%Y-%m-%d %H:%M") if o.get("created_at") else None,
-            "updated_at": o.get("updated_at").strftime("%Y-%m-%d %H:%M") if o.get("updated_at") else None,
+            "created_at": _fmt_dt(o.get("created_at")),
+            "updated_at": _fmt_dt(o.get("updated_at")),
         })
     return formatted
 
@@ -43,7 +50,8 @@ def get_categories() -> str:
         str: JSON array of categories. Each object contains:
             - id (int):            Use this as category_id in create_discount
             - name (str):          Category display name
-            - description (str):   Category description
+            - mm_name (str):       Myanmar name
+            - category_type (str): Category type
     """
     try:
         categories = ctr.get_all()
@@ -72,17 +80,13 @@ def get_category_by_name_or_id(id: int = None, name: str = None) -> dict:
 
     # get_by_id returns a dict, get_by_name returns a list of dicts
     if isinstance(category, list):
-        return format_category(category)
-    return format_category([category])
+        return {"categories": format_category(category)}
+    return {"categories": format_category([category])}
 
 @mcp.tool(
     name="create_category"
 ) 
-def create_category (name , mm_name , slug) -> dict :
-    """Create Category """
-    # if not can('admin.access.create') :
-    #     return {'message' :  "current user do not have access to performance this action"}
-    return Category.create({
-        "name" : name , "mm_name" : mm_name , "slug" : slug , "category_type" : "package"
-    })
+def create_category(name, mm_name, slug) -> dict:
+    """Create Category"""
+    return ctr.create(name=name, mm_name=mm_name, slug_name=slug)
     

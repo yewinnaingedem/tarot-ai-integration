@@ -1,113 +1,35 @@
 # mcp_app/permission.py
+from contextvars import ContextVar
 from mcp_app.db import get_connection
 
 MODEL_TYPE = "App\\Domains\\Auth\\Models\\User"
 
-# ── Session store — keyed by user_id ─────────────────────────
-_sessions: dict = {}
-_current_user_id: int = 0
+# ── Per-async-task user context (safe for concurrent connections) ──
+_current_user_id: ContextVar[int] = ContextVar('current_user_id', default=0)
+
+# ── Permission cache: { user_id: {"roles": [...], "permissions": [...]} } ──
+_perm_cache: dict = {}
+
+# ── User info cache: { user_id: (data, expires_at) } ──
+_user_info_cache: dict = {}
 
 def set_current_user(user_id: int):
-    global _current_user_id
-    _current_user_id = user_id
+    _current_user_id.set(user_id)
 
 def get_current_user() -> int:
-    return _current_user_id
+    return _current_user_id.get()
 
 def clear_current_user():
-    global _current_user_id
-    _current_user_id = 0
-
-# ── can() — no args needed, uses current user ─────────────────
-def can(permission: str) -> bool:
-    user_id = _current_user_id
-    if not user_id:
-        return False
-    return _check_permission(user_id, permission)
-
-def has_role(role: str) -> bool:
-    user_id = _current_user_id
-    if not user_id:
-        return False
-    return _check_role(user_id, role)
-
-def is_admin() -> bool:
-    return _check_role(_current_user_id, "Administrator")
-
-# ── DB queries ────────────────────────────────────────────────
-def _check_permission(user_id: int, permission: str) -> bool:
-    conn = get_connection()
-    try:
-        cur = conn.cursor()
-        # Administrator has all permissions
-        cur.execute("""
-            SELECT COUNT(*) FROM model_has_roles mhr
-            INNER JOIN roles r ON r.id = mhr.role_id
-            WHERE mhr.model_id   = %s
-              AND mhr.model_type = %s
-              AND r.name         = 'Administrator'
-        """, (user_id, MODEL_TYPE))
-        if cur.fetchone()[0]:
-            return True
-
-        # Build list: exact permission + all parent prefixes
-        # e.g. "admin.access.order.view" → also check "admin.access.order"
-        perms_to_check = [permission]
-        parts = permission.rsplit(".", 1)
-        while len(parts) == 2:
-            perms_to_check.append(parts[0])
-            parts = parts[0].rsplit(".", 1)
-
-        placeholders = ",".join(["%s"] * len(perms_to_check))
-
-        # Via role
-        cur.execute(f"""
-            SELECT COUNT(*)
-            FROM permissions p
-            INNER JOIN role_has_permissions rhp ON rhp.permission_id = p.id
-            INNER JOIN model_has_roles mhr      ON mhr.role_id       = rhp.role_id
-            WHERE mhr.model_id   = %s
-              AND mhr.model_type = %s
-              AND p.name IN ({placeholders})
-        """, (user_id, MODEL_TYPE, *perms_to_check))
-        if cur.fetchone()[0]:
-            return True
-
-        # Direct
-        cur.execute(f"""
-            SELECT COUNT(*)
-            FROM permissions p
-            INNER JOIN model_has_permissions mhp ON mhp.permission_id = p.id
-            WHERE mhp.model_id   = %s
-              AND mhp.model_type = %s
-              AND p.name IN ({placeholders})
-        """, (user_id, MODEL_TYPE, *perms_to_check))
-        return bool(cur.fetchone()[0])
-
-    finally:
-        conn.close()
-
-def _check_role(user_id: int, role: str) -> bool:
-    if not user_id:
-        return False
-    conn = get_connection()
-    try:
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT COUNT(*) FROM model_has_roles mhr
-            INNER JOIN roles r ON r.id = mhr.role_id
-            WHERE mhr.model_id   = %s
-              AND mhr.model_type = %s
-              AND r.name         = %s
-        """, (user_id, MODEL_TYPE, role))
-        return bool(cur.fetchone()[0])
-    finally:
-        conn.close()
+    _current_user_id.set(0)
 
 def get_user_info() -> dict:
-    """Get current user info from DB"""
-    if not _current_user_id:
+    import time
+    user_id = _current_user_id.get()
+    if not user_id:
         return {}
+    cached, expires = _user_info_cache.get(user_id, (None, 0))
+    if cached and time.time() < expires:
+        return cached
     conn = get_connection()
     try:
         cur = conn.cursor(dictionary=True)
@@ -117,9 +39,90 @@ def get_user_info() -> dict:
             LEFT JOIN model_has_roles mhr ON mhr.model_id = u.id
                 AND mhr.model_type = %s
             LEFT JOIN roles r ON r.id = mhr.role_id
-            WHERE u.id = %s
-            LIMIT 1
-        """, (MODEL_TYPE, _current_user_id))
-        return cur.fetchone() or {}
+            WHERE u.id = %s LIMIT 1
+        """, (MODEL_TYPE, user_id))
+        result = cur.fetchone() or {}
+        _user_info_cache[user_id] = (result, time.time() + 300)
+        return result
     finally:
         conn.close()
+
+def invalidate_permission_cache(user_id: int = None):
+    """Call this if roles/permissions change. Pass user_id or None to clear all."""
+    if user_id:
+        _perm_cache.pop(user_id, None)
+    else:
+        _perm_cache.clear()
+
+def _load_permissions(user_id: int) -> dict:
+    """Load and cache permissions for a user. Returns cached result on repeat calls."""
+    if user_id in _perm_cache:
+        return _perm_cache[user_id]
+
+    conn = get_connection()
+    try:
+        cur = conn.cursor(dictionary=True)
+
+        # Get roles
+        cur.execute("""
+            SELECT r.id, r.name FROM roles r
+            INNER JOIN model_has_roles mhr ON mhr.role_id = r.id
+            WHERE mhr.model_id = %s AND mhr.model_type = %s
+        """, (user_id, MODEL_TYPE))
+        roles = cur.fetchall()
+        role_names = [r["name"] for r in roles]
+        role_ids   = [r["id"]   for r in roles]
+
+        if "Administrator" in role_names:
+            cur.execute("SELECT name FROM permissions")
+            permissions = {r["name"] for r in cur.fetchall()}
+        else:
+            permissions = set()
+            if role_ids:
+                ph = ",".join(["%s"] * len(role_ids))
+                cur.execute(f"""
+                    SELECT DISTINCT p.name FROM permissions p
+                    INNER JOIN role_has_permissions rhp ON rhp.permission_id = p.id
+                    WHERE rhp.role_id IN ({ph})
+                """, role_ids)
+                permissions = {r["name"] for r in cur.fetchall()}
+
+            # Direct user permissions
+            cur.execute("""
+                SELECT p.name FROM permissions p
+                INNER JOIN model_has_permissions mhp ON mhp.permission_id = p.id
+                WHERE mhp.model_id = %s AND mhp.model_type = %s
+            """, (user_id, MODEL_TYPE))
+            permissions |= {r["name"] for r in cur.fetchall()}
+
+        result = {"roles": role_names, "permissions": permissions}
+        _perm_cache[user_id] = result
+        return result
+    finally:
+        conn.close()
+
+def can(permission: str) -> bool:
+    user_id = _current_user_id.get()
+    if not user_id:
+        return False
+    data = _load_permissions(user_id)
+    # Check exact permission + all parent prefixes
+    # e.g. "admin.access.order.view" also matches "admin.access.order"
+    parts = permission
+    while parts:
+        if parts in data["permissions"]:
+            return True
+        dot = parts.rfind(".")
+        if dot == -1:
+            break
+        parts = parts[:dot]
+    return False
+
+def has_role(role: str) -> bool:
+    user_id = _current_user_id.get()
+    if not user_id:
+        return False
+    return role in _load_permissions(user_id)["roles"]
+
+def is_admin() -> bool:
+    return has_role("Administrator")

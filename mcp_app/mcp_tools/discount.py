@@ -148,7 +148,7 @@ def create_discount(params: CreateDiscountInput) -> str:
     """
     try:
         if hasattr(params, 'amount'):
-            params.amount = float(params.amount)
+            params.amount = float(str(params.amount).replace('%', '').replace(',', '').strip())
         if hasattr(params, 'category_id') and params.category_id is not None:
             if str(params.category_id).lower() in ("null", "none", ""):
                 params.category_id = None
@@ -253,3 +253,125 @@ def deactivate_discount(params: DeactivateDiscountInput) -> str:
         return json.dumps(result, ensure_ascii=False, indent=2)
     except Exception as e:
         return json.dumps({"success": False, "error": str(e)})
+
+
+# ─────────────────────────────────────────────
+# Tool 6 — get_discount_usage
+# ─────────────────────────────────────────────
+@mcp.tool(
+    name="get_discount_usage",
+    annotations={"title": "Get Discount Usage Stats", "readOnlyHint": True},
+)
+def get_discount_usage(discount_id: int) -> str:
+    """
+    Show how many orders used a specific discount and total revenue generated.
+    Use when admin asks if a discount is working or how many people used it.
+
+    Args:
+        discount_id: ID from get_discounts
+    """
+    from mcp_app.db import get_connection
+    from decimal import Decimal
+
+    conn = get_connection()
+    try:
+        cur = conn.cursor(dictionary=True)
+        cur.execute("SELECT * FROM discounts WHERE id = %s AND deleted_at IS NULL", (discount_id,))
+        discount = cur.fetchone()
+        if not discount:
+            return json.dumps({"error": f"Discount ID {discount_id} not found"})
+
+        cur.execute("""
+            SELECT COUNT(*) AS total_orders,
+                   SUM(CASE WHEN o.status='complete' THEN 1 ELSE 0 END) AS completed,
+                   COALESCE(SUM(CASE WHEN o.status='complete' THEN o.total_amount END), 0) AS revenue
+            FROM orders o
+            WHERE o.deleted_at IS NULL
+              AND o.promotion_type = 'discount'
+              AND o.created_at BETWEEN %s AND %s
+              AND o.package_id IN (
+                  SELECT id FROM packages
+                  WHERE category_id = %s AND deleted_at IS NULL
+              )
+        """, (discount["start_date"], discount["end_date"], discount["category_id"]))
+        stats = cur.fetchone()
+
+        amount = float(discount["amount"]) if isinstance(discount["amount"], Decimal) else discount["amount"]
+        revenue = float(stats["revenue"]) if isinstance(stats["revenue"], Decimal) else (stats["revenue"] or 0)
+
+        return json.dumps({
+            "discount_id":   discount_id,
+            "title":         discount["title"],
+            "amount":        f"{amount}%" if discount["type"] == "percentage" else f"{amount:,.0f} MMK",
+            "period":        f"{str(discount['start_date'])[:10]} → {str(discount['end_date'])[:10]}",
+            "active":        bool(discount["active"]),
+            "total_orders":  int(stats["total_orders"] or 0),
+            "completed":     int(stats["completed"] or 0),
+            "revenue":       f"{int(revenue):,} MMK",
+        })
+    finally:
+        conn.close()
+
+
+# ─────────────────────────────────────────────
+# Tool 7 — remove_package_from_discount
+# ─────────────────────────────────────────────
+@mcp.tool(
+    name="remove_package_from_discount",
+    annotations={"title": "Remove a Package from a Discount", "readOnlyHint": False, "destructiveHint": False},
+)
+def remove_package_from_discount(discount_id: int, package_id: int) -> str:
+    """
+    Remove a specific package from an existing discount without affecting other packages.
+    Deactivates the old discount and recreates it with the package removed.
+
+    Args:
+        discount_id: ID of the discount (from get_discounts)
+        package_id:  ID of the package to remove (from get_packages_by_category)
+    """
+    from mcp_app.db import get_connection
+
+    conn = get_connection()
+    try:
+        cur = conn.cursor(dictionary=True)
+        cur.execute("SELECT * FROM discounts WHERE id = %s AND deleted_at IS NULL", (discount_id,))
+        discount = cur.fetchone()
+        if not discount:
+            return json.dumps({"error": f"Discount ID {discount_id} not found"})
+
+        raw = discount.get("package_id", "[]")
+        try:
+            pkg_ids = json.loads(raw) if isinstance(raw, str) else (raw or [])
+            pkg_ids = [int(p) for p in pkg_ids]
+        except Exception:
+            pkg_ids = []
+
+        if package_id not in pkg_ids:
+            return json.dumps({"error": f"Package {package_id} is not in discount {discount_id}"})
+
+        new_pkg_ids = [p for p in pkg_ids if p != package_id]
+
+        if not new_pkg_ids:
+            # No packages left — just deactivate
+            cur.execute("UPDATE discounts SET active = 0, updated_at = NOW() WHERE id = %s", (discount_id,))
+            conn.commit()
+            return json.dumps({"success": True, "message": "Last package removed — discount deactivated.", "discount_id": discount_id})
+
+        # Deactivate old, create new with remaining packages
+        cur.execute("UPDATE discounts SET active = 0, updated_at = NOW() WHERE id = %s", (discount_id,))
+        conn.commit()
+
+        result = DiscountRepository.create_discount(
+            category_id=discount["category_id"],
+            discount_type=discount["type"],
+            amount=float(discount["amount"]),
+            title=discount["title"],
+            start_date=str(discount["start_date"])[:10],
+            end_date=str(discount["end_date"])[:10],
+            package_ids=new_pkg_ids,
+        )
+        result["removed_package_id"] = package_id
+        result["old_discount_id"] = discount_id
+        return json.dumps(result, ensure_ascii=False)
+    finally:
+        conn.close()

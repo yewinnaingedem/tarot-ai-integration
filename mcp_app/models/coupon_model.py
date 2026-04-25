@@ -87,10 +87,12 @@ class Coupon(Model):
     @classmethod
     def check_date_overlap(
         cls,
-        start_date:  str,
-        end_date:    str,
-        category_id: int  = None,
-        exclude_id:  int  = None,
+        start_date:   str,
+        end_date:     str,
+        coupon_type:  str  = None,
+        amount:       float = None,
+        category_id:  int  = None,
+        exclude_id:   int  = None,
     ) -> list:
         """
         Check if any existing coupon overlaps with given date range.
@@ -102,7 +104,7 @@ class Coupon(Model):
         try:
             cur = conn.cursor(dictionary=True)
 
-            # Base overlap query
+            # Base overlap query — only block exact duplicates (same category + type + amount)
             sql = """
                 SELECT c.id, c.code, c.coupon_type, c.amount,
                     c.start_date, c.end_date,
@@ -110,18 +112,18 @@ class Coupon(Model):
                 FROM coupons c
                 LEFT JOIN category cat ON cat.id = c.category_id
                 WHERE c.deleted_at IS NULL
-                AND c.active     = 1
-                AND c.start_date <= %s
-                AND c.end_date   >= %s
+                AND c.active       = 1
+                AND c.start_date  <= %s
+                AND c.end_date    >= %s
+                AND c.coupon_type  = %s
+                AND c.amount       = %s
             """
-            params = [end_date, start_date]
+            params = [end_date, start_date, coupon_type, amount]
 
-            # Filter by category if provided
             if category_id:
-                sql    += " AND (c.category_id = %s OR c.category_id IS NULL)"
+                sql    += " AND c.category_id = %s"
                 params.append(category_id)
 
-            # Exclude current coupon when updating
             if exclude_id:
                 sql    += " AND c.id != %s"
                 params.append(exclude_id)

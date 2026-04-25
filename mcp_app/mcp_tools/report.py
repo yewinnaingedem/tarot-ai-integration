@@ -138,7 +138,10 @@ def _report_unreplied(filename):
         LEFT JOIN packages p ON o.package_id = p.id
         LEFT JOIN category c ON p.category_id = c.id
         LEFT JOIN reply r ON r.order_id = o.id AND r.deleted_at IS NULL
-        WHERE o.payment_complete = 1 AND o.deleted_at IS NULL AND r.id IS NULL
+        WHERE o.payment_complete = 1
+          AND o.status = 'pending'
+          AND o.deleted_at IS NULL
+          AND r.id IS NULL
         ORDER BY o.created_at ASC
     """)
 

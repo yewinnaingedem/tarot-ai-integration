@@ -12,10 +12,10 @@ class Anthropic:
         self.client         = anthropic.AsyncAnthropic(
             api_key=os.getenv("ANTHROPIC_API_KEY"),
             max_retries=3,
-            timeout=httpx.Timeout(300.0, connect=10.0),
+            timeout=httpx.Timeout(180.0, connect=10.0),
         )
-        self.model          = "claude-sonnet-4-20250514"
-        self.fast_model     = "claude-haiku-3-5-20241022"
+        self.model          = "claude-sonnet-4-6"
+        self.fast_model     = "claude-haiku-4-5-20251001"
         self._tools         = []
         self._mcp           = None
         self._pending_download = None
@@ -49,7 +49,7 @@ class Anthropic:
             content = result.content[0].text if result.content else "{}"
             try:
                 parsed = json.loads(content)
-                if parsed.get("type") == "csv_download":
+                if isinstance(parsed, dict) and parsed.get("type") == "csv_download":
                     self._pending_download = {
                         "filename": parsed["filename"],
                         "data":     parsed["data"],
@@ -102,16 +102,22 @@ class Anthropic:
         tool_keywords = [
             "order", "discount", "coupon", "revenue", "sales", "package",
             "pending", "customer", "performance", "trend", "create",
-            "deactivate", "show", "list", "get", "fetch", "total",
+            "deactivate", "inactive", "active", "show", "list", "get", "fetch", "total",
             "report", "analyze", "best", "worst", "summary", "today",
             "week", "month", "follow", "urgent", "latest", "how many",
             "how much", "give me", "check", "holiday", "thingyan",
             "yesterday", "category",
             "reply", "unreplied", "unanswered", "respond", "answer",
-            "remind", "paid", "waiting", "overdue", "pktr", "batch",
+            "remind", "paid", "waiting", "overdue", "pktr", "ptr", "batch",
             "export", "csv", "download", "excel",
             "age", "gender", "demographic", "profile", "အသက်", "ကျား", "မ",
-            "yes", "confirm", "အတည်ပြု",
+            "yes", "confirm", "အတည်ပြု", "ပိတ်", "ဖွင့်", "ပယ်ဖျက်",
+            "reply time", "response time", "fast", "slow", "နှေး", "မြန်",
+            "repeat", "loyal", "vip", "retention", "ထပ်ဝယ်", "အကြိမ်များ",
+            "promotion", "effective", "roi", "discount work", "coupon work",
+            "role", "permission", "access", "user", "admin user", "who can",
+            "log", "error", "bug", "crash", "exception", "debug", "issue", "broken",
+            "laravel", "backend", "system", "check log", "what went wrong",
         ]
         # Web search keywords
         web_keywords = [
@@ -119,6 +125,15 @@ class Anthropic:
             "what is", "how to", "latest", "news", "trend", "other platform",
         ]
         needs_web = any(kw in msg_lower for kw in web_keywords)
+
+        # Always enable tools for confirmation messages
+        is_confirmation = (
+            "အတည်ပြုပြီး" in message
+            or "[confirm_action" in msg_lower
+            or ("confirm" in msg_lower and any(t in msg_lower for t in ["coupon", "discount", "reply"]))
+        )
+        if is_confirmation:
+            return list(self._tools)
 
         if any(kw in msg_lower for kw in tool_keywords):
             tools = list(self._tools)
@@ -136,30 +151,111 @@ class Anthropic:
                         return self._tools
         return None
 
+    # ── Summarize old history via Haiku ──────────────────────
+    async def _summarize_history(self, messages: list) -> str:
+        text = "\n".join(f"{m['role'].upper()}: {m['content'][:300]}" for m in messages)
+        resp = await self.client.messages.create(
+            model=self.fast_model,
+            max_tokens=512,
+            messages=[{
+                "role": "user",
+                "content": (
+                    "Summarize the following conversation history in English. "
+                    "Be concise. Preserve key facts, decisions, orders, coupons, "
+                    "discounts, and any confirmed actions.\n\n" + text
+                ),
+            }],
+        )
+        return resp.content[0].text if resp.content else ""
+
+    async def _maybe_compress(self, history: list, session_id: int | None) -> list:
+        """If history is too long, summarize old messages and replace with summary."""
+        THRESHOLD_MSGS  = 20
+        THRESHOLD_CHARS = 8000
+        KEEP_RECENT     = 6
+        RESUMMARY_EVERY = 10  # re-summarize after 10 new messages
+
+        total_chars = sum(len(m.get("content") or "") for m in history)
+        if len(history) <= THRESHOLD_MSGS and total_chars <= THRESHOLD_CHARS:
+            return history
+
+        from mcp_app.conversation import get_summary, set_summary
+        old_msgs = history[:-KEEP_RECENT]
+        recent   = history[-KEEP_RECENT:]
+
+        existing, summarized_at = get_summary(session_id) if session_id else (None, 0)
+        # Re-summarize only if history grew by RESUMMARY_EVERY since last summary
+        if existing and (len(history) - summarized_at) < RESUMMARY_EVERY:
+            summary_text = existing
+        else:
+            summary_text = await self._summarize_history(old_msgs)
+            if session_id:
+                set_summary(session_id, summary_text, len(history))
+            print(f"📝 History compressed: {len(old_msgs)} msgs → summary")
+
+        summary_msg = {"role": "user", "content": f"[Conversation summary so far]: {summary_text}"}
+        return [summary_msg] + recent
+
     # ── Build messages list ───────────────────────────────────
     def _build_messages(self, message: str, history: list):
         messages = []
-        # Use more history (8 msgs, 600 chars) when replying to orders
-        has_order_ref = "PKTR-" in message.upper() or "reply" in message.lower()
-        limit = 8 if has_order_ref else 4
-        max_chars = 600 if has_order_ref else 300
+        msg_lower = message.lower()
+        has_order_ref = "PKTR-" in message.upper() or "reply" in msg_lower
+        # Use extended history when confirming an action so tool params aren't lost
+        is_confirmation = (
+            "အတည်ပြုပြီး" in message
+            or "confirm" in msg_lower
+            or "create_coupon" in msg_lower
+            or "create_discount" in msg_lower
+            or "[confirm_action" in msg_lower
+        )
+        if is_confirmation:
+            limit, max_chars = 12, 1200
+        elif has_order_ref:
+            limit, max_chars = 8, 600
+        else:
+            limit, max_chars = 4, 300
         for h in history[-limit:]:
             if h.get("role") in ("user", "assistant") and h.get("content"):
                 messages.append({"role": h["role"], "content": h["content"][:max_chars]})
         messages.append({"role": "user", "content": message})
         return messages
 
-    # ── Non-streaming chat (kept for REST API) ────────────────
-    async def chat(self, message: str, history: list = []) -> str:
+    # ── Decide model based on query complexity ────────────────
+    def _pick_model(self, message: str, has_tools: bool) -> str:
+        """Use Haiku for simple read-only queries, Sonnet for write/analysis."""
+        # Myanmar script → always Sonnet (Haiku breaks language rules)
+        if any('\u1000' <= c <= '\u109F' for c in message):
+            return self.model
+        if not has_tools:
+            return self.fast_model  # greetings, general questions
+        msg_lower = message.lower()
+        # Write operations always need Sonnet
+        write_keywords = [
+            "create", "deactivate", "reply", "update", "cancel", "batch",
+            "ဖန်တီး", "ပိတ်", "ပြင်", "အတည်ပြု", "confirm",
+        ]
+        if any(kw in msg_lower for kw in write_keywords):
+            return self.model
+        # Complex analysis needs Sonnet
+        analysis_keywords = ["suggest", "analyze", "compare", "trend", "demographic", "performance"]
+        if any(kw in msg_lower for kw in analysis_keywords):
+            return self.model
+        # Simple lookups → Haiku
+        return self.fast_model
+
+    async def chat(self, message: str, history: list = [], session_id: int | None = None) -> str:
         await self._sync_user(get_current_user())
+        history  = await self._maybe_compress(history, session_id)
         system   = self._build_system(get_user_info())
         messages = self._build_messages(message, history)
         active_tools = self._needs_tools(message, history)
+        selected_model = self._pick_model(message, bool(active_tools))
         called_tools = set()
 
         for _ in range(5):
             kwargs = {
-                "model": self.model, "max_tokens": 4096,
+                "model": selected_model, "max_tokens": 2048,
                 "system": system, "messages": messages,
             }
             if active_tools:
@@ -170,6 +266,7 @@ class Anthropic:
             except Exception as e:
                 print(f"⚠️ Anthropic error: {e}")
                 if "overloaded" in str(e).lower():
+                    await asyncio.sleep(2)
                     print(f"🔄 Retrying with {self.fast_model}...")
                     try:
                         kwargs["model"] = self.fast_model
@@ -186,22 +283,20 @@ class Anthropic:
                 return "\n".join(b.text for b in response.content if hasattr(b, "text")) or "ထပ်ကြိုးစားပေးပါ။"
 
             tool_blocks = [b for b in response.content if b.type == "tool_use"]
-            unique = [tc for tc in tool_blocks if tc.name not in called_tools]
+            unique = [tc for tc in tool_blocks if tc.id not in called_tools]
             for tc in unique:
-                called_tools.add(tc.name)
+                called_tools.add(tc.id)
 
             if not unique:
                 return "\n".join(b.text for b in response.content if hasattr(b, "text")) or "ပြန်ဖြေချက် မရှိပါ။"
 
             messages.append({"role": "assistant", "content": response.content})
-            tool_results = []
-            for tc in unique:
-                result = await self._call_tool(tc.name, tc.input)
-                tool_results.append({
-                    "type": "tool_result", "tool_use_id": tc.id, "content": result,
-                })
+            results = await asyncio.gather(*[self._call_tool(tc.name, tc.input) for tc in unique])
+            tool_results = [
+                {"type": "tool_result", "tool_use_id": tc.id, "content": result}
+                for tc, result in zip(unique, results)
+            ]
             messages.append({"role": "user", "content": tool_results})
-            active_tools = None
 
         return "ထပ်ကြိုးစားပေးပါ။"
 
@@ -224,27 +319,41 @@ class Anthropic:
         "get_discounts":             "Discount များ ကြည့်နေပါတယ်...",
         "deactivate_discount":       "Discount ပိတ်နေပါတယ်...",
         "get_coupons":               "Coupon များ ကြည့်နေပါတယ်...",
+        "get_coupon":                "Coupon အချက်အလက် ကြည့်နေပါတယ်...",
+        "find_coupon_by_code":       "Coupon ရှာနေပါတယ်...",
         "create_coupon":             "Coupon ဖန်တီးနေပါတယ်...",
+        "update_coupon":             "Coupon ပြင်ဆင်နေပါတယ်...",
+        "deactivate_coupon":         "Coupon ပိတ်နေပါတယ်...",
         "generate_order_report":     "📊 Report ထုတ်နေပါတယ်...",
         "get_customer_demographics": "👥 Customer demographics ခွဲခြမ်းစိတ်ဖြာနေပါတယ်...",
+        "get_reply_performance":     "Reply time စစ်နေပါတယ်...",
+        "get_repeat_customers":      "Loyal customer များ ရှာနေပါတယ်...",
+        "get_promotion_effectiveness": "Promotion effectiveness စစ်နေပါတယ်...",
+        "get_roles_and_permissions": "Role နှင့် permission များ ကြည့်နေပါတယ်...",
+        "get_admin_users":           "Admin user များ ကြည့်နေပါတယ်...",
+        "check_user_permission":     "Permission စစ်နေပါတယ်...",
+        "read_logs":                 "Log ဖိုင်များ ဖတ်နေပါတယ်...",
+        "list_log_dates":            "Log ရက်စွဲများ ကြည့်နေပါတယ်...",
         "reply_to_order":            "✍️ Order ကို reply လုပ်နေပါတယ်...",
         "batch_reply_orders":        "✍️ Order များကို reply လုပ်နေပါတယ်...",
     }
 
     # ── Streaming chat (for WebSocket) ────────────────────────
-    async def chat_stream(self, message: str, history: list = [], on_chunk=None, on_status=None):
+    async def chat_stream(self, message: str, history: list = [], on_chunk=None, on_status=None, session_id: int | None = None):
         """Stream response token-by-token via on_chunk(text) callback."""
         await self._sync_user(get_current_user())
+        history  = await self._maybe_compress(history, session_id)
         system   = self._build_system(get_user_info())
         messages = self._build_messages(message, history)
         active_tools = self._needs_tools(message, history)
+        selected_model = self._pick_model(message, bool(active_tools))
         called_tools = set()
         full_text = ""
         last_tool_result = "{}"
 
         for _ in range(5):
             kwargs = {
-                "model": self.model, "max_tokens": 4096,
+                "model": selected_model, "max_tokens": 2048,
                 "system": system, "messages": messages,
             }
             if active_tools:
@@ -260,8 +369,8 @@ class Anthropic:
                     response = await stream.get_final_message()
             except Exception as e:
                 print(f"⚠️ Anthropic stream error: {e}")
-                # Retry once with fast model on overload
                 if "overloaded" in str(e).lower():
+                    await asyncio.sleep(2)
                     print(f"🔄 Retrying with {self.fast_model}...")
                     try:
                         kwargs["model"] = self.fast_model
@@ -280,9 +389,9 @@ class Anthropic:
                         return err
                 else:
                     err = "တစ်ခုခု မှားယွင်းနေပါသည်။ ထပ်ကြိုးစားပေးပါ။"
-                if on_chunk:
-                    await on_chunk(err)
-                return err
+                    if on_chunk:
+                        await on_chunk(err)
+                    return err
 
             if response.stop_reason == "end_turn":
                 if not full_text and last_tool_result and last_tool_result != "{}":
@@ -303,7 +412,7 @@ class Anthropic:
                         messages.append({"role": "user", "content": [{"type": "text", "text": "ရလဒ်ကို မြန်မာလို အကျဉ်းချုပ် ပြောပြပါ။"}]})
                         try:
                             async with self.client.messages.stream(
-                                model=self.model, max_tokens=4096,
+                                model=selected_model, max_tokens=2048,
                                 system=system, messages=messages,
                             ) as stream:
                                 async for event in stream:
@@ -320,28 +429,26 @@ class Anthropic:
 
             # Handle tool calls, then stream the next turn
             tool_blocks = [b for b in response.content if b.type == "tool_use"]
-            unique = [tc for tc in tool_blocks if tc.name not in called_tools]
+            unique = [tc for tc in tool_blocks if tc.id not in called_tools]
             for tc in unique:
-                called_tools.add(tc.name)
+                called_tools.add(tc.id)
 
             if not unique:
                 return full_text or "ပြန်ဖြေချက် မရှိပါ။"
 
             messages.append({"role": "assistant", "content": response.content})
-            tool_results = []
-            for tc in unique:
-                if on_status:
-                    label = self.TOOL_LABELS.get(tc.name, f"🔧 {tc.name} ခေါ်နေပါတယ်...")
-                    await on_status(label)
-                result = await self._call_tool(tc.name, tc.input)
-                last_tool_result = result
-                tool_results.append({
-                    "type": "tool_result", "tool_use_id": tc.id, "content": result,
-                })
+            if on_status:
+                labels = [self.TOOL_LABELS.get(tc.name, f"🔧 {tc.name} ခေါ်နေပါတယ်...") for tc in unique]
+                await asyncio.gather(*[on_status(label) for label in labels])
+            results = await asyncio.gather(*[self._call_tool(tc.name, tc.input) for tc in unique])
+            last_tool_result = results[-1]
+            tool_results = [
+                {"type": "tool_result", "tool_use_id": tc.id, "content": result}
+                for tc, result in zip(unique, results)
+            ]
             if on_status:
                 await on_status("✍️ ဖြေကြားနေပါတယ်...")
             messages.append({"role": "user", "content": tool_results})
-            active_tools = None
             full_text = ""  # reset for the post-tool response
 
         return "ထပ်ကြိုးစားပေးပါ။"

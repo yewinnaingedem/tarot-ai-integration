@@ -7,6 +7,8 @@ import mcp_app.mcp_tools.category
 import mcp_app.mcp_tools.package
 import mcp_app.mcp_tools.report
 import mcp_app.mcp_tools.analyise
+import mcp_app.mcp_tools.admin
+import mcp_app.mcp_tools.logs
 
 
 @mcp.tool()

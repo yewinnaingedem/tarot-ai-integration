@@ -1,4 +1,5 @@
 # mcp_app/mcp_tools/coupon.py
+from typing import Optional
 from ..core import mcp
 from ..models.coupon_model import Coupon
 from ..permission import can
@@ -6,12 +7,34 @@ from datetime import datetime
 import json
 
 
+def _fmt_dt(val, fmt="%Y-%m-%d %H:%M"):
+    if not val:
+        return None
+    if hasattr(val, 'strftime'):
+        return val.strftime(fmt)
+    s = str(val)
+    return s[:len(fmt.replace('%Y','0000').replace('%m','00').replace('%d','00').replace('%H','00').replace('%M','00'))]
+
+
 def format_coupon(c: dict) -> dict:
     now      = datetime.now()
     end_date = c.get("end_date")
+    # end_date may be a string — parse it for comparison
+    if isinstance(end_date, str):
+        try:
+            end_date = datetime.fromisoformat(end_date)
+        except Exception:
+            end_date = None
     expired  = end_date < now if end_date else False
     used     = int(c.get("used_times") or 0)
     avail    = int(c.get("available_times") or 0)
+
+    start_date = c.get("start_date")
+    if isinstance(start_date, str):
+        try:
+            start_date = datetime.fromisoformat(start_date)
+        except Exception:
+            start_date = None
 
     return {
         "id":             c.get("id"),
@@ -32,20 +55,20 @@ def format_coupon(c: dict) -> dict:
             "fully_used": used >= avail if avail > 0 else False,
         },
         "period": {
-            "start": c.get("start_date").strftime("%Y-%m-%d") if c.get("start_date") else None,
-            "end":   end_date.strftime("%Y-%m-%d")            if end_date              else None,
+            "start": _fmt_dt(start_date, "%Y-%m-%d"),
+            "end":   _fmt_dt(end_date,   "%Y-%m-%d"),
         },
         "active":      bool(c.get("active")),
         "expired":     expired,
         "status": (
-            "✅ Active"   if bool(c.get("active")) and not expired and used < avail else
-            "⏰ Expired"  if expired                                                  else
-            "🚫 Used Up"  if used >= avail and avail > 0                              else
-            "❌ Inactive"
+            "Active"   if bool(c.get("active")) and not expired and used < avail else
+            "Expired"  if expired                                                  else
+            "Used Up"  if used >= avail and avail > 0                              else
+            "Inactive"
         ),
         "with_discount": bool(c.get("with_discount")),
         "created_by":    c.get("created_by"),
-        "created_at":    c.get("created_at").strftime("%Y-%m-%d %H:%M") if c.get("created_at") else None,
+        "created_at":    _fmt_dt(c.get("created_at")),
     }
 
 
@@ -120,16 +143,13 @@ def create_coupon(
     available_times: int,
     start_date:      str,
     end_date:        str,
-    category_id:     int        = None,
-    package_ids:     list[int]  = None,   # ← add package_ids
+    category_id:     Optional[int] = None,
+    package_ids:     Optional[list[int]] = None,
     with_discount:   bool       = False,
     active:          bool       = True,
 ) -> dict:
     """
-    Create coupon. WORKFLOW:
-    1. Call get_categories first to get category_id
-    2. Call get_packages_by_category if specific packages needed
-    3. Call create_coupon with correct IDs
+    Create coupon. If category_id is None, creates one coupon per category (all categories).
 
     Args:
         coupon_type:     percentage or amount
@@ -137,16 +157,25 @@ def create_coupon(
         available_times: max uses
         start_date:      YYYY-MM-DD
         end_date:        YYYY-MM-DD
-        category_id:     from get_categories
-        package_ids:     list of package IDs from get_packages_by_category
+        category_id:     specific category ID, or None for all categories
+        package_ids:     list of package IDs (only used when category_id is set)
         with_discount:   stack with discounts
         active:          activate immediately
     """
-    # if not can("admin.access.coupon.create"):
-    #     return {"message": "You don't have permission to create coupons"}
-
     if coupon_type not in ("percentage", "amount"):
         return {"error": "coupon_type must be 'percentage' or 'amount'"}
+
+    # Coerce 'null'/'none' strings from AI
+    if isinstance(category_id, str) and category_id.lower() in ('null', 'none', ''):
+        category_id = None
+    if isinstance(package_ids, str) and package_ids.lower() in ('null', 'none', '[]', ''):
+        package_ids = None
+
+    # Coerce amount
+    try:
+        amount = float(str(amount).replace('%', '').replace(',', '').strip())
+    except (ValueError, TypeError):
+        return {"error": f"Invalid amount value: {amount}"}
 
     if coupon_type == "percentage" and (amount <= 0 or amount > 100):
         return {"error": "Percentage must be between 1 and 100"}
@@ -159,44 +188,43 @@ def create_coupon(
         return {"error": "Invalid date format. Use YYYY-MM-DD"}
 
     if end < start:
-        return {"error": f"end_date must be after start_date"}
+        return {"error": "end_date must be after start_date"}
 
     if end < datetime.now():
-        return {"error": f"end_date is in the past"}
+        return {"error": "end_date is in the past"}
 
-    # ── Check date overlap ────────────────────────────────────
-    overlapping = Coupon.check_date_overlap(
-        start_date  = start_date,
-        end_date    = end_date,
-        category_id = category_id,
-    )
+    from ..permission import get_current_user
+    import json as _json
+    now     = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    if overlapping:
-        conflicts = [{
-            "id":       o["id"],
-            "code":     o["code"],
-            "amount":   f"{int(o['amount'])}%" if o["coupon_type"] == "percentage" else f"{int(o['amount']):,} MMK",
-            "period":   f"{o['start_date'].strftime('%Y-%m-%d')} → {o['end_date'].strftime('%Y-%m-%d')}",
-            "category": o["category_name"] or "All Categories",
-        } for o in overlapping]
+    def _create_one(cat_id):
+        """Create a single coupon for a given category_id."""
+        # Auto-fetch all package IDs for this category if none specified
+        pkg_ids = package_ids
+        if not pkg_ids:
+            from ..models.package_model import Package
+            pkgs = Package.where("category_id", cat_id)
+            pkg_ids = [p["id"] for p in pkgs]
 
-        return {
-            "error":      "Date overlap detected",
-            "message":    f"Cannot create — {len(conflicts)} existing coupon(s) overlap this period.",
-            "conflicts":  conflicts,
-            "suggestion": f"Deactivate coupon {conflicts[0]['id']} ({conflicts[0]['code']}) first.",
-        }
+        # Check overlap per category
+        overlapping = Coupon.check_date_overlap(
+            start_date  = start_date,
+            end_date    = end_date,
+            coupon_type = coupon_type,
+            amount      = amount,
+            category_id = cat_id,
+        )
+        if overlapping:
+            conflicts = [{
+                "id":     o["id"],
+                "code":   o["code"],
+                "period": f"{_fmt_dt(o['start_date'], '%Y-%m-%d')} → {_fmt_dt(o['end_date'], '%Y-%m-%d')}",
+            } for o in overlapping]
+            return {"error": "overlap", "conflicts": conflicts, "category_id": cat_id}
 
-    # ── Create coupon ─────────────────────────────────────────
-    try:
         code = Coupon.generate_code()
         while Coupon.find_by_code(code):
             code = Coupon.generate_code()
-
-        from ..permission import get_current_user
-        import json
-        now     = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        user_id = get_current_user()
 
         coupon = Coupon.create({
             "code":            code,
@@ -204,33 +232,57 @@ def create_coupon(
             "amount":          amount,
             "available_times": available_times,
             "used_times":      0,
-            "package_id":      json.dumps(package_ids) if package_ids else json.dumps([]),
-            "category_id":     category_id,
+            "package_id":      _json.dumps(pkg_ids) if pkg_ids else _json.dumps([]),
+            "category_id":     cat_id,
             "start_date":      start_date + " 00:00:00",
             "end_date":        end_date   + " 23:59:59",
-            "active":          1 if active        else 0,
+            "active":          1 if active else 0,
             "created_user":    1,
             "updated_user":    1,
             "created_at":      now,
             "updated_at":      now,
         })
+        return {"success": True, "code": code, "coupon": format_coupon(Coupon.find_with_relations(coupon["id"]))}
 
-        # Build confirmation message
-        scope = "All categories"
-        if category_id and package_ids:
-            scope = f"Category {category_id} — {len(package_ids)} specific packages"
-        elif category_id:
-            scope = f"Category {category_id} — all packages"
+    # ── All categories: loop and create one per category ──────
+    if not category_id:
+        from ..models.category_model import Category
+        categories = Category.all()
+        if not categories:
+            return {"error": "No categories found"}
+
+        created, skipped = [], []
+        for cat in categories:
+            result = _create_one(cat["id"])
+            if result.get("success"):
+                created.append({"category": cat["name"], "code": result["code"]})
+            else:
+                skipped.append({"category": cat["name"], "conflicts": result.get("conflicts", [])})
 
         return {
-            "success": True,
-            "message": f"✅ Coupon created!",
-            "code":    code,
-            "scope":   scope,
-            "coupon":  format_coupon(Coupon.find_with_relations(coupon["id"])),
+            "success":      True,
+            "message":      f"Created {len(created)} coupon(s) across all categories.",
+            "created":      created,
+            "skipped":      skipped,
         }
-    except Exception as e:
-        return {"success": False, "error": str(e)}
+
+    # ── Single category ───────────────────────────────────────
+    result = _create_one(category_id)
+    if not result.get("success"):
+        conflicts = result.get("conflicts", [])
+        return {
+            "error":      "Date overlap detected",
+            "message":    f"Cannot create — overlaps with existing coupon(s).",
+            "conflicts":  conflicts,
+            "suggestion": f"Deactivate coupon {conflicts[0]['id']} ({conflicts[0]['code']}) first." if conflicts else "",
+        }
+
+    return {
+        "success": True,
+        "message": "Coupon created!",
+        "code":    result["code"],
+        "coupon":  result["coupon"],
+    }
 
 # ── Tool 5: Update coupon ─────────────────────────────────────
 @mcp.tool()
@@ -270,8 +322,10 @@ def update_coupon(
             overlapping = Coupon.check_date_overlap(
                 start_date  = new_start,
                 end_date    = new_end,
+                coupon_type = coupon.get("coupon_type"),
+                amount      = coupon.get("amount"),
                 category_id = coupon.get("category_id"),
-                exclude_id  = coupon_id,   # ← exclude self
+                exclude_id  = coupon_id,
             )
 
             if overlapping:
@@ -288,11 +342,7 @@ def update_coupon(
                 }
 
         # ── Build update data ─────────────────────────────────
-        from ..permission import get_current_user
-        data = {
-            "updated_at":   datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "updated_user": get_current_user(),
-        }
+        data = {}
 
         if available_times is not None: data["available_times"] = available_times
         if amount          is not None: data["amount"]          = amount
@@ -325,10 +375,7 @@ def deactivate_coupon(coupon_id: int) -> dict:
         if not coupon:
             return {"message": f"Coupon {coupon_id} not found"}
 
-        Coupon.update(coupon_id, {
-            "active":     0,
-            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        })
+        Coupon.update(coupon_id, {"active": 0})
 
         return {
             "success": True,
