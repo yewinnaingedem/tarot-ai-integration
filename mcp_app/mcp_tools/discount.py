@@ -3,7 +3,6 @@ from typing import Literal, Optional
 from pydantic import BaseModel, Field, field_validator, ConfigDict, model_validator
 from mcp_app.core import mcp
 from mcp_app.repository.discount_repository import DiscountRepository
-from mcp_app.repository.category_repository import CouponRepository
 import json
 
 

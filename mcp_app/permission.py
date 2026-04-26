@@ -7,13 +7,10 @@ MODEL_TYPE = "App\\Domains\\Auth\\Models\\User"
 # ── Per-async-task user context (safe for concurrent connections) ──
 _current_user_id: ContextVar[int] = ContextVar('current_user_id', default=0)
 
-# ── Permission cache: { user_id: (data, expires_at) } ──
-_perm_cache: dict = {}
-
-# ── User info cache: { user_id: (data, expires_at) } ──
+# ── User info cache: { user_id: (data, expires_at) } — short TTL, non-security ──
 _user_info_cache: dict = {}
 
-PERM_CACHE_TTL = 300  # 5 minutes
+PERM_CACHE_TTL = 300  # used only for user info (name/email), not permissions
 
 def set_current_user(user_id: int):
     _current_user_id.set(user_id)
@@ -50,24 +47,14 @@ def get_user_info() -> dict:
         conn.close()
 
 def invalidate_permission_cache(user_id: int = None):
-    """Call this if roles/permissions change. Pass user_id or None to clear all."""
-    if user_id:
-        _perm_cache.pop(user_id, None)
-    else:
-        _perm_cache.clear()
+    pass  # permissions are now real-time, no cache to invalidate
 
 def _load_permissions(user_id: int) -> dict:
-    """Load and cache permissions for a user with TTL."""
-    import time
-    entry = _perm_cache.get(user_id)
-    if entry and time.time() < entry[1]:
-        return entry[0]
-
+    """Load permissions fresh from DB on every call (real-time authorization)."""
     conn = get_connection()
     try:
         cur = conn.cursor(dictionary=True)
 
-        # Get roles
         cur.execute("""
             SELECT r.id, r.name FROM roles r
             INNER JOIN model_has_roles mhr ON mhr.role_id = r.id
@@ -91,7 +78,6 @@ def _load_permissions(user_id: int) -> dict:
                 """, role_ids)
                 permissions = {r["name"] for r in cur.fetchall()}
 
-            # Direct user permissions
             cur.execute("""
                 SELECT p.name FROM permissions p
                 INNER JOIN model_has_permissions mhp ON mhp.permission_id = p.id
@@ -99,9 +85,7 @@ def _load_permissions(user_id: int) -> dict:
             """, (user_id, MODEL_TYPE))
             permissions |= {r["name"] for r in cur.fetchall()}
 
-        result = {"roles": role_names, "permissions": permissions}
-        _perm_cache[user_id] = (result, time.time() + PERM_CACHE_TTL)
-        return result
+        return {"roles": role_names, "permissions": permissions}
     finally:
         conn.close()
 

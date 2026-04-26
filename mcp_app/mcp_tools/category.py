@@ -1,6 +1,6 @@
 from ..core import mcp
 from ..models.category_model import Category
-from ..repository.category_repository import CouponRepository as ctr
+from ..repository.category_repository import CategoryRepository as ctr
 from ..permission import can
 import json
 

@@ -1,7 +1,10 @@
 from mcp_app.models.category_model import Category
 from datetime import datetime
 
-class CouponRepository:
+# Alias for backward compatibility
+CouponRepository = None  # removed — use CategoryRepository
+
+class CategoryRepository:
 
     # ─────────────────────────────────────────────
     # Read
@@ -19,7 +22,7 @@ class CouponRepository:
             ]
         """
         rows = Category.all()
-        return [CouponRepository._format(row) for row in rows]
+        return [CategoryRepository._format(row) for row in rows]
 
     @staticmethod
     def get_by_id(category_id: int) -> dict | None:
@@ -31,7 +34,7 @@ class CouponRepository:
         row = Category.find(category_id)
         if not row:
             return None
-        return CouponRepository._format(row)
+        return CategoryRepository._format(row)
 
     @staticmethod
     def get_by_name(name: str) -> list[dict]:
@@ -41,7 +44,7 @@ class CouponRepository:
         Useful for resolving user input like "Tarot" → category_id.
         """
         rows = Category.where_like("name", name)
-        return [CouponRepository._format(row) for row in rows]
+        return [CategoryRepository._format(row) for row in rows]
 
     # ─────────────────────────────────────────────
     # Write
@@ -69,7 +72,7 @@ class CouponRepository:
             'created_at' : created_at , 
             "update_at" : update_at
         })
-        return CouponRepository._format(row)
+        return CategoryRepository._format(row)
 
     @staticmethod
     def update(category_id: int, data: dict) -> dict | None:
@@ -87,7 +90,7 @@ class CouponRepository:
         if not existing:
             return None
         row = Category.update(category_id, data)
-        return CouponRepository._format(row)
+        return CategoryRepository._format(row)
 
     @staticmethod
     def delete(category_id: int) -> bool:

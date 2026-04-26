@@ -27,16 +27,3 @@ def store_message(session_id: int, user_id: int, role: str, content: str, voice_
         conn.commit()
     finally:
         conn.close()
-
-def get_session_messages(session_id: int) -> list:
-    conn = get_connection()
-    try:
-        cur = conn.cursor(dictionary=True)
-        cur.execute("""
-            SELECT role, content FROM chat_messages
-            WHERE chat_session_id = %s
-            ORDER BY created_at ASC
-        """, (session_id,))
-        return cur.fetchall()
-    finally:
-        conn.close()

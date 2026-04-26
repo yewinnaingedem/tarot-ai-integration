@@ -19,6 +19,12 @@ def generate_token() -> tuple[str, str]:
     return plain, hashed
 
 
+# ── Token verify cache: { token_id: (user_dict, expires_at) } ──
+import time as _time
+_token_cache: dict = {}
+_TOKEN_CACHE_TTL = 60  # seconds — short enough to respect revocation
+
+
 # ── Login ─────────────────────────────────────────────────────
 def login(email: str, password: str) -> dict | None:
     conn = get_connection()
@@ -42,6 +48,23 @@ def login(email: str, password: str) -> dict | None:
         # Verify password
         if not verify_password(password, user["password"]):
             return None
+
+        # Clean up old tokens for this user (keep last 5)
+        cur.execute("""
+            DELETE FROM personal_access_tokens
+            WHERE tokenable_id = %s
+              AND tokenable_type = %s
+              AND id NOT IN (
+                SELECT id FROM (
+                    SELECT id FROM personal_access_tokens
+                    WHERE tokenable_id = %s AND tokenable_type = %s
+                    ORDER BY created_at DESC LIMIT 5
+                ) t
+              )
+        """, (
+            user["id"], "App\\Domains\\Auth\\Models\\User",
+            user["id"], "App\\Domains\\Auth\\Models\\User",
+        ))
 
         # Generate token
         plain, hashed = generate_token()
@@ -82,7 +105,13 @@ def verify_token(raw_token: str) -> dict | None:
 
     token_id, plain = raw_token.split("|", 1)
     hashed          = hashlib.sha256(plain.encode()).hexdigest()
-    ttl_days        = int(os.getenv("TOKEN_TTL_DAYS", "30"))
+
+    # Check cache first
+    cached = _token_cache.get(token_id)
+    if cached and _time.time() < cached[1]:
+        return cached[0]
+
+    ttl_days = int(os.getenv("TOKEN_TTL_DAYS", "30"))
 
     conn = get_connection()
     try:
@@ -99,6 +128,7 @@ def verify_token(raw_token: str) -> dict | None:
         row = cur.fetchone()
 
         if not row:
+            _token_cache.pop(token_id, None)
             return None
 
         # Token TTL check
@@ -106,6 +136,7 @@ def verify_token(raw_token: str) -> dict | None:
         if age > ttl_days:
             cur.execute("DELETE FROM personal_access_tokens WHERE id = %s", (token_id,))
             conn.commit()
+            _token_cache.pop(token_id, None)
             return None
 
         cur.execute(
@@ -114,11 +145,13 @@ def verify_token(raw_token: str) -> dict | None:
         )
         conn.commit()
 
-        return {
+        result = {
             "id":    row["tokenable_id"],
             "name":  row["name"],
             "email": row["email"],
         }
+        _token_cache[token_id] = (result, _time.time() + _TOKEN_CACHE_TTL)
+        return result
 
     finally:
         conn.close()

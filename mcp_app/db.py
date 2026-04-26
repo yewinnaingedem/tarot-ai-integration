@@ -12,6 +12,7 @@ _pool = mysql.connector.pooling.MySQLConnectionPool(
     password=os.getenv("DB_PASSWORD", ""),
     database=os.getenv("DB_DATABASE", "tarot_db"),
     port=int(os.getenv("DB_PORT", "3306")),
+    autocommit=False,
 )
 
 def get_connection():

@@ -179,10 +179,10 @@ class Anthropic:
 
     async def _maybe_compress(self, history: list, session_id: int | None) -> list:
         """If history is too long, summarize old messages and replace with summary."""
-        THRESHOLD_MSGS  = 20
-        THRESHOLD_CHARS = 8000
-        KEEP_RECENT     = 10   # keep more recent messages for confirmation flows
-        RESUMMARY_EVERY = 8
+        THRESHOLD_MSGS  = 30
+        THRESHOLD_CHARS = 20000
+        KEEP_RECENT     = 12
+        RESUMMARY_EVERY = 10
 
         total_chars = sum(len(m.get("content") or "") for m in history)
         if len(history) <= THRESHOLD_MSGS and total_chars <= THRESHOLD_CHARS:

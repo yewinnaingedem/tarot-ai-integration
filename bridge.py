@@ -354,7 +354,8 @@ async def reply_to_order(
 from fastapi.responses import StreamingResponse
 import hashlib
 
-_tts_cache: dict = {}  # simple in-memory cache: hash -> mp3 bytes
+_tts_cache: dict = {}  # hash -> mp3 bytes
+_TTS_CACHE_MAX_BYTES = 50 * 1024 * 1024  # 50 MB cap
 
 class TTSRequest(BaseModel):
     text:  str
@@ -391,7 +392,8 @@ async def text_to_speech(
         raise HTTPException(status_code=503, detail="TTS service unavailable, try again")
 
     audio = b"".join(chunks)
-    if len(_tts_cache) > 200:
+    # Evict oldest entries if cache exceeds size cap
+    while sum(len(v) for v in _tts_cache.values()) + len(audio) > _TTS_CACHE_MAX_BYTES and _tts_cache:
         _tts_cache.pop(next(iter(_tts_cache)))
     _tts_cache[cache_key] = audio
 
