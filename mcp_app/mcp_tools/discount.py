@@ -190,30 +190,22 @@ def create_discount(params: CreateDiscountInput) -> str:
         "openWorldHint": False,
     },
 )
-def get_discounts(category_id: Optional[int] = None) -> str:
+def get_discounts(category_id: Optional[int] = None, include_expired: bool = False) -> str:
     """
-    Retrieve all currently active discounts, optionally filtered by category.
-
-    Call this before deactivate_discount to find the correct discount_id.
+    Retrieve active discounts, optionally filtered by category.
 
     Args:
-        category_id (int | None): Filter by category. Pass null to see all discounts.
+        category_id (int | None): Filter by category. Pass null to see all.
+        include_expired (bool): True = include date-expired but still active=1 discounts (use for deactivation). Default False = only currently running discounts.
 
     Returns:
-        str: JSON array of active discount objects containing:
-            - id (int):            Use this in deactivate_discount
-            - category_id (int)
-            - category_name (str)
-            - package_ids (list):  Parsed list of package IDs
-            - title (str)
-            - type (str):          'percentage' or 'amount'
-            - amount (float):      Discount value
-            - start_date (str)
-            - end_date (str)
+        str: JSON array of discount objects.
     """
     try:
         if category_id:
             discounts = DiscountRepository.get_by_category(category_id)
+        elif include_expired:
+            discounts = DiscountRepository.get_all_including_expired()
         else:
             discounts = DiscountRepository.get_all_active()
         return json.dumps(discounts, ensure_ascii=False, indent=2)

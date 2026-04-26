@@ -1,22 +1,40 @@
 # bridge.py
-from fastapi import FastAPI, WebSocket, Depends, HTTPException, Header
+from fastapi import FastAPI, WebSocket, Depends, HTTPException, UploadFile, File, Form, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 from mcp_app.auth import login, verify_token
 from mcp_app.permission import set_current_user
 from mcp_app.websocket import handle_websocket
 from mcp_app.conversation import load_history, load_history_from_db
+from mcp_app.models.chat_session import store_message
 from mcp_app.logger import logger
 from fastapi.middleware.cors import CORSMiddleware
-import asyncio
-import os
+import asyncio, os, uuid, io, time, glob
 
-app      = FastAPI()
+limiter = Limiter(key_func=get_remote_address)
+
+app = FastAPI()
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 security = HTTPBearer()
 
+VOICE_DIR   = os.path.join(os.path.dirname(__file__), "storage", "voice")
+MAX_UPLOAD  = int(os.getenv("MAX_UPLOAD_MB", "10")) * 1024 * 1024
+VOICE_TTL   = int(os.getenv("VOICE_TTL_DAYS", "30")) * 86400
+
+os.makedirs(VOICE_DIR, exist_ok=True)
+app.mount("/storage/voice", StaticFiles(directory=VOICE_DIR), name="voice")
+
+# CORS from env — set your production domain in ALLOWED_ORIGINS
+_origins = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "http://localhost:8000,http://127.0.0.1:8000").split(",")]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:8000", "http://127.0.0.1:8000"],
+    allow_origins=_origins,
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
@@ -43,7 +61,8 @@ class ConversationRequest(BaseModel):
     chat_session_id : int
 
 @app.post("/auth/login")
-async def auth_login(req: LoginRequest):
+@limiter.limit("10/minute")
+async def auth_login(request: Request, req: LoginRequest):
     loop   = asyncio.get_event_loop()
     result = await loop.run_in_executor(None, login, req.email, req.password)
     if not result:
@@ -72,6 +91,98 @@ async def get_conversation(
 @app.websocket("/ws")
 async def websocket_route(websocket: WebSocket):
     await handle_websocket(websocket)
+
+# ── Voice: transcribe + save audio ───────────────────────────
+@app.post("/transcribe")
+@limiter.limit("30/minute")
+async def transcribe(
+    request:    Request,
+    audio:      UploadFile = File(...),
+    session_id: int        = Form(0),
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+):
+    from groq import AsyncGroq
+    loop = asyncio.get_event_loop()
+    user = await loop.run_in_executor(None, verify_token, credentials.credentials)
+    if not user:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    audio_bytes = await audio.read(MAX_UPLOAD + 1)
+    if len(audio_bytes) > MAX_UPLOAD:
+        raise HTTPException(status_code=413, detail=f"File too large. Max {os.getenv('MAX_UPLOAD_MB', '10')}MB.")
+
+    # Save audio for replay + cleanup old files
+    filename = f"{uuid.uuid4().hex}.webm"
+    with open(os.path.join(VOICE_DIR, filename), "wb") as f:
+        f.write(audio_bytes)
+    _cleanup_old_voice_files()
+
+    # Convert webm → PCM 16kHz mono (AWS requires raw PCM)
+    import subprocess
+    proc = await asyncio.create_subprocess_exec(
+        "ffmpeg", "-i", "pipe:0",
+        "-ar", "16000", "-ac", "1", "-f", "s16le", "pipe:1",
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+    )
+    pcm_bytes, _ = await proc.communicate(input=audio_bytes)
+
+    # Transcribe via AWS Transcribe Streaming
+    from amazon_transcribe.client import TranscribeStreamingClient
+    from amazon_transcribe.handlers import TranscriptResultStreamHandler
+    from amazon_transcribe.model import TranscriptEvent
+
+    class Handler(TranscriptResultStreamHandler):
+        def __init__(self, stream):
+            super().__init__(stream)
+            self.transcript = []
+
+        async def handle_transcript_event(self, event: TranscriptEvent):
+            for result in event.transcript.results:
+                if not result.is_partial:
+                    for alt in result.alternatives:
+                        self.transcript.append(alt.transcript)
+
+    client = TranscribeStreamingClient(region=os.getenv("AWS_REGION", "ap-southeast-1"))
+
+    stream = await client.start_stream_transcription(
+        language_code="my-MM",
+        media_sample_rate_hz=16000,
+        media_encoding="pcm",
+    )
+
+    handler = Handler(stream.output_stream)
+
+    async def send_audio():
+        chunk_size = 8192
+        for i in range(0, len(pcm_bytes), chunk_size):
+            await stream.input_stream.send_audio_event(audio_chunk=pcm_bytes[i:i+chunk_size])
+            await asyncio.sleep(0.01)
+        await stream.input_stream.end_stream()
+
+    await asyncio.gather(send_audio(), handler.handle_events())
+    text = " ".join(handler.transcript).strip()
+
+    from mcp_app.models.chat_session import create_chat_session
+    if not session_id:
+        session_id = await loop.run_in_executor(
+            None, create_chat_session, user["id"], (text[:50] if text else "Voice message")
+        )
+
+    await loop.run_in_executor(
+        None, store_message, session_id, user["id"], "user", text, f"storage/voice/{filename}"
+    )
+
+    return {"text": text, "voice_file": filename, "session_id": session_id}
+
+def _cleanup_old_voice_files():
+    """Delete voice files older than VOICE_TTL_DAYS."""
+    now = time.time()
+    for f in glob.glob(os.path.join(VOICE_DIR, "*.webm")):
+        if now - os.path.getmtime(f) > VOICE_TTL:
+            try:
+                os.remove(f)
+            except OSError:
+                pass
 
 # ── Dashboard endpoint ────────────────────────────────────────
 @app.get("/api/dashboard")

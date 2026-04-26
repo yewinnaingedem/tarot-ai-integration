@@ -6,7 +6,7 @@ load_dotenv()
 
 _pool = mysql.connector.pooling.MySQLConnectionPool(
     pool_name="tarot_pool",
-    pool_size=5,
+    pool_size=int(os.getenv("DB_POOL_SIZE", "15")),
     host=os.getenv("DB_HOST", "localhost"),
     user=os.getenv("DB_USERNAME", "root"),
     password=os.getenv("DB_PASSWORD", ""),

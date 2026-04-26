@@ -10,12 +10,17 @@ import asyncio, json
 
 _disconnected = set()  # track closed websocket ids
 
+def _mark_disconnected(ws_id: int):
+    _disconnected.add(ws_id)
+    if len(_disconnected) > 1000:   # prevent unbounded growth
+        _disconnected.clear()
+
 async def _safe_send(websocket: WebSocket, data: dict):
     """Send JSON to websocket, silently ignore if already closed."""
     try:
         await websocket.send_json(data)
     except (WebSocketDisconnect, RuntimeError):
-        _disconnected.add(id(websocket))
+        _mark_disconnected(id(websocket))
 
 async def handle_websocket(websocket: WebSocket):
     try:
@@ -132,9 +137,11 @@ async def handle_websocket(websocket: WebSocket):
                 })
 
             # ── Store user message to DB ──────────────────────
-            await loop.run_in_executor(
-                None, store_message, session_id, user_id, "user", original_message
-            )
+            # Skip if voice message already stored by /transcribe
+            if not payload.get("voice_stored"):
+                await loop.run_in_executor(
+                    None, store_message, session_id, user_id, "user", original_message
+                )
 
             # ── Append to memory cache ────────────────────────
             append_to_history(session_id, "user", original_message)

@@ -7,11 +7,13 @@ MODEL_TYPE = "App\\Domains\\Auth\\Models\\User"
 # ── Per-async-task user context (safe for concurrent connections) ──
 _current_user_id: ContextVar[int] = ContextVar('current_user_id', default=0)
 
-# ── Permission cache: { user_id: {"roles": [...], "permissions": [...]} } ──
+# ── Permission cache: { user_id: (data, expires_at) } ──
 _perm_cache: dict = {}
 
 # ── User info cache: { user_id: (data, expires_at) } ──
 _user_info_cache: dict = {}
+
+PERM_CACHE_TTL = 300  # 5 minutes
 
 def set_current_user(user_id: int):
     _current_user_id.set(user_id)
@@ -55,9 +57,11 @@ def invalidate_permission_cache(user_id: int = None):
         _perm_cache.clear()
 
 def _load_permissions(user_id: int) -> dict:
-    """Load and cache permissions for a user. Returns cached result on repeat calls."""
-    if user_id in _perm_cache:
-        return _perm_cache[user_id]
+    """Load and cache permissions for a user with TTL."""
+    import time
+    entry = _perm_cache.get(user_id)
+    if entry and time.time() < entry[1]:
+        return entry[0]
 
     conn = get_connection()
     try:
@@ -96,7 +100,7 @@ def _load_permissions(user_id: int) -> dict:
             permissions |= {r["name"] for r in cur.fetchall()}
 
         result = {"roles": role_names, "permissions": permissions}
-        _perm_cache[user_id] = result
+        _perm_cache[user_id] = (result, time.time() + PERM_CACHE_TTL)
         return result
     finally:
         conn.close()
@@ -106,8 +110,6 @@ def can(permission: str) -> bool:
     if not user_id:
         return False
     data = _load_permissions(user_id)
-    # Check exact permission + all parent prefixes
-    # e.g. "admin.access.order.view" also matches "admin.access.order"
     parts = permission
     while parts:
         if parts in data["permissions"]:

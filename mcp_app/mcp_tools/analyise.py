@@ -79,6 +79,18 @@ def _resolve_period(period: str) -> tuple:
         end = first_this
         label = "Last Month"
     else:
+        # Try YYYY-MM format (e.g. "2025-04" for April 2025)
+        try:
+            parsed = datetime.strptime(period, "%Y-%m")
+            start = parsed.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+            if parsed.month == 12:
+                end = parsed.replace(year=parsed.year + 1, month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
+            else:
+                end = parsed.replace(month=parsed.month + 1, day=1, hour=0, minute=0, second=0, microsecond=0)
+            label = parsed.strftime("%B %Y")
+            return start, end, label
+        except ValueError:
+            pass
         start = datetime(2020, 1, 1)
         end = now
         label = "All Time"
@@ -701,8 +713,8 @@ def get_category_analysis(period: str = "this_month", compare_period: str = None
     - compare categories between months
 
     Args:
-        period: "this_week" | "this_month" | "last_month" | "all_time"
-        compare_period: Optional second period to compare against (e.g. "last_month"). Returns both periods with change %.
+        period: "this_week" | "this_month" | "last_month" | "all_time" | "YYYY-MM" (e.g. "2025-04" for April 2025)
+        compare_period: Optional second period in the same format (e.g. "last_month" or "2025-04").
 
     Returns:
         Per-category stats: orders, revenue, conversion, top package per category.

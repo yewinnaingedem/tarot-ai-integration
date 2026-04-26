@@ -1,6 +1,7 @@
 # mcp_app/auth.py
 import secrets
 import hashlib
+import os
 import bcrypt
 from datetime import datetime
 from mcp_app.db import get_connection
@@ -81,13 +82,14 @@ def verify_token(raw_token: str) -> dict | None:
 
     token_id, plain = raw_token.split("|", 1)
     hashed          = hashlib.sha256(plain.encode()).hexdigest()
+    ttl_days        = int(os.getenv("TOKEN_TTL_DAYS", "30"))
 
     conn = get_connection()
     try:
         cur = conn.cursor(dictionary=True)
 
         cur.execute("""
-            SELECT pat.tokenable_id, u.name, u.email
+            SELECT pat.tokenable_id, pat.created_at, u.name, u.email
             FROM   personal_access_tokens pat
             INNER JOIN users u ON u.id = pat.tokenable_id
             WHERE  pat.id    = %s
@@ -99,12 +101,17 @@ def verify_token(raw_token: str) -> dict | None:
         if not row:
             return None
 
-        # Update last_used_at
-        cur.execute("""
-            UPDATE personal_access_tokens
-            SET last_used_at = %s
-            WHERE id = %s
-        """, (datetime.now(), token_id))
+        # Token TTL check
+        age = (datetime.now() - row["created_at"]).days
+        if age > ttl_days:
+            cur.execute("DELETE FROM personal_access_tokens WHERE id = %s", (token_id,))
+            conn.commit()
+            return None
+
+        cur.execute(
+            "UPDATE personal_access_tokens SET last_used_at = %s WHERE id = %s",
+            (datetime.now(), token_id)
+        )
         conn.commit()
 
         return {

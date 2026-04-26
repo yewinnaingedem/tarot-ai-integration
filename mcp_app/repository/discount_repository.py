@@ -14,6 +14,22 @@ class DiscountRepository:
                 FROM discounts d
                 LEFT JOIN category c ON c.id = d.category_id
                 WHERE d.deleted_at IS NULL AND d.active = 1
+                  AND d.end_date >= CURDATE()
+                ORDER BY d.start_date ASC
+            """)
+            return [DiscountRepository._format(row) for row in rows]
+        except Exception as e:
+            raise
+
+    @staticmethod
+    def get_all_including_expired() -> list[dict]:
+        """Returns all active=1 discounts regardless of date (for management/deactivation)."""
+        try:
+            rows = Discount.join_query("""
+                SELECT d.*, c.name AS category_name
+                FROM discounts d
+                LEFT JOIN category c ON c.id = d.category_id
+                WHERE d.deleted_at IS NULL AND d.active = 1
                 ORDER BY d.created_at DESC
             """)
             return [DiscountRepository._format(row) for row in rows]

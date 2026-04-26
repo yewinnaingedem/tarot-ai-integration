@@ -10,3 +10,4 @@ wheels/
 .venv
 .env
 cloude-install.sh
+/storage/voice/

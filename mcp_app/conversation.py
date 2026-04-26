@@ -43,11 +43,19 @@ def load_history_from_db(session_id: int) -> list:
     try:
         cur = conn.cursor(dictionary=True)
         cur.execute("""
-            SELECT role, content, created_at FROM chat_messages
+            SELECT role, content, voice_path, created_at FROM chat_messages
             WHERE chat_session_id = %s
             ORDER BY created_at ASC
         """, (session_id,))
-        messages = [{"role": r["role"], "content": r["content"], "created_at": str(r["created_at"]) if r["created_at"] else None} for r in cur.fetchall()]
+        messages = [
+            {
+                "role": r["role"],
+                "content": r["content"],
+                "voice_path": r.get("voice_path"),
+                "created_at": str(r["created_at"]) if r["created_at"] else None,
+            }
+            for r in cur.fetchall()
+        ]
         _cache[session_id] = messages
         _cache.move_to_end(session_id)
         return messages
@@ -70,10 +78,31 @@ def clear_history(session_id: int):
 _summaries: dict = {}
 
 def get_summary(session_id: int) -> tuple[str, int] | tuple[None, int]:
-    return _summaries.get(session_id, (None, 0))
+    if session_id in _summaries:
+        return _summaries[session_id]
+    # Fall back to DB
+    conn = get_connection()
+    try:
+        cur = conn.cursor(dictionary=True)
+        cur.execute("SELECT summary FROM chat_sessions WHERE id = %s", (session_id,))
+        row = cur.fetchone()
+        if row and row.get("summary"):
+            _summaries[session_id] = (row["summary"], 0)
+            return _summaries[session_id]
+    finally:
+        conn.close()
+    return (None, 0)
 
 def set_summary(session_id: int, summary: str, history_len: int):
     _summaries[session_id] = (summary, history_len)
+    # Persist to DB
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute("UPDATE chat_sessions SET summary = %s WHERE id = %s", (summary, session_id))
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def get_history(session_id: int) -> list:

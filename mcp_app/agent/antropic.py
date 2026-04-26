@@ -153,16 +153,25 @@ class Anthropic:
 
     # ── Summarize old history via Haiku ──────────────────────
     async def _summarize_history(self, messages: list) -> str:
-        text = "\n".join(f"{m['role'].upper()}: {m['content'][:300]}" for m in messages)
+        def _trim(msg: dict) -> str:
+            role    = msg["role"].upper()
+            content = msg.get("content") or ""
+            # Keep user messages full (short), trim long assistant/tool responses
+            if role == "USER":
+                return f"USER: {content[:400]}"
+            # For assistant: keep first 600 chars (contains the key answer)
+            return f"ASSISTANT: {content[:600]}"
+
+        text = "\n".join(_trim(m) for m in messages)
         resp = await self.client.messages.create(
             model=self.fast_model,
-            max_tokens=512,
+            max_tokens=600,
             messages=[{
                 "role": "user",
                 "content": (
-                    "Summarize the following conversation history in English. "
-                    "Be concise. Preserve key facts, decisions, orders, coupons, "
-                    "discounts, and any confirmed actions.\n\n" + text
+                    "Summarize this admin conversation briefly in Myanmar. "
+                    "Keep: order refs (PKTR-xxx), discount/coupon IDs, amounts, dates, confirmed actions. "
+                    "Skip greetings and repeated data. Max 3-4 sentences.\n\n" + text
                 ),
             }],
         )
@@ -172,28 +181,36 @@ class Anthropic:
         """If history is too long, summarize old messages and replace with summary."""
         THRESHOLD_MSGS  = 20
         THRESHOLD_CHARS = 8000
-        KEEP_RECENT     = 6
-        RESUMMARY_EVERY = 10  # re-summarize after 10 new messages
+        KEEP_RECENT     = 10   # keep more recent messages for confirmation flows
+        RESUMMARY_EVERY = 8
 
         total_chars = sum(len(m.get("content") or "") for m in history)
         if len(history) <= THRESHOLD_MSGS and total_chars <= THRESHOLD_CHARS:
             return history
 
         from mcp_app.conversation import get_summary, set_summary
-        old_msgs = history[:-KEEP_RECENT]
-        recent   = history[-KEEP_RECENT:]
-
         existing, summarized_at = get_summary(session_id) if session_id else (None, 0)
-        # Re-summarize only if history grew by RESUMMARY_EVERY since last summary
-        if existing and (len(history) - summarized_at) < RESUMMARY_EVERY:
+
+        # Only summarize messages that haven't been summarized yet
+        new_since_last = len(history) - summarized_at
+        if existing and new_since_last < RESUMMARY_EVERY:
             summary_text = existing
         else:
-            summary_text = await self._summarize_history(old_msgs)
+            # Summarize only the unseen old messages, append to existing summary
+            old_msgs = history[:-KEEP_RECENT]
+            new_old  = old_msgs[summarized_at:] if existing else old_msgs
+            if new_old:
+                new_summary = await self._summarize_history(new_old)
+                summary_text = f"{existing}\n\n{new_summary}".strip() if existing else new_summary
+            else:
+                summary_text = existing or ""
             if session_id:
                 set_summary(session_id, summary_text, len(history))
             print(f"📝 History compressed: {len(old_msgs)} msgs → summary")
 
-        summary_msg = {"role": "user", "content": f"[Conversation summary so far]: {summary_text}"}
+        recent = history[-KEEP_RECENT:]
+        # Inject as assistant role so Claude treats it as prior context, not user input
+        summary_msg = {"role": "assistant", "content": f"[ယခင် စကားဝိုင်း အကျဉ်းချုပ်]: {summary_text}"}
         return [summary_msg] + recent
 
     # ── Build messages list ───────────────────────────────────
@@ -201,7 +218,6 @@ class Anthropic:
         messages = []
         msg_lower = message.lower()
         has_order_ref = "PKTR-" in message.upper() or "reply" in msg_lower
-        # Use extended history when confirming an action so tool params aren't lost
         is_confirmation = (
             "အတည်ပြုပြီး" in message
             or "confirm" in msg_lower
@@ -209,12 +225,18 @@ class Anthropic:
             or "create_discount" in msg_lower
             or "[confirm_action" in msg_lower
         )
-        if is_confirmation:
-            limit, max_chars = 12, 1200
+        # Detect ongoing discount/coupon creation flow from recent history
+        is_creation_flow = any(
+            kw in (h.get("content") or "")
+            for h in history[-6:]
+            for kw in ("CONFIRM_ACTION", "create_discount", "create_coupon", "Discount", "Coupon")
+        )
+        if is_confirmation or is_creation_flow:
+            limit, max_chars = 14, 2000
         elif has_order_ref:
-            limit, max_chars = 8, 600
+            limit, max_chars = 8, 1000
         else:
-            limit, max_chars = 4, 300
+            limit, max_chars = 8, 1200
         for h in history[-limit:]:
             if h.get("role") in ("user", "assistant") and h.get("content"):
                 messages.append({"role": h["role"], "content": h["content"][:max_chars]})
@@ -222,27 +244,8 @@ class Anthropic:
         return messages
 
     # ── Decide model based on query complexity ────────────────
-    def _pick_model(self, message: str, has_tools: bool) -> str:
-        """Use Haiku for simple read-only queries, Sonnet for write/analysis."""
-        # Myanmar script → always Sonnet (Haiku breaks language rules)
-        if any('\u1000' <= c <= '\u109F' for c in message):
-            return self.model
-        if not has_tools:
-            return self.fast_model  # greetings, general questions
-        msg_lower = message.lower()
-        # Write operations always need Sonnet
-        write_keywords = [
-            "create", "deactivate", "reply", "update", "cancel", "batch",
-            "ဖန်တီး", "ပိတ်", "ပြင်", "အတည်ပြု", "confirm",
-        ]
-        if any(kw in msg_lower for kw in write_keywords):
-            return self.model
-        # Complex analysis needs Sonnet
-        analysis_keywords = ["suggest", "analyze", "compare", "trend", "demographic", "performance"]
-        if any(kw in msg_lower for kw in analysis_keywords):
-            return self.model
-        # Simple lookups → Haiku
-        return self.fast_model
+    def _pick_model(self, message: str, has_tools: bool, history: list = []) -> str:
+        return self.model
 
     async def chat(self, message: str, history: list = [], session_id: int | None = None) -> str:
         await self._sync_user(get_current_user())
@@ -250,7 +253,7 @@ class Anthropic:
         system   = self._build_system(get_user_info())
         messages = self._build_messages(message, history)
         active_tools = self._needs_tools(message, history)
-        selected_model = self._pick_model(message, bool(active_tools))
+        selected_model = self._pick_model(message, bool(active_tools), history)
         called_tools = set()
 
         for _ in range(5):
@@ -346,7 +349,7 @@ class Anthropic:
         system   = self._build_system(get_user_info())
         messages = self._build_messages(message, history)
         active_tools = self._needs_tools(message, history)
-        selected_model = self._pick_model(message, bool(active_tools))
+        selected_model = self._pick_model(message, bool(active_tools), history)
         called_tools = set()
         full_text = ""
         last_tool_result = "{}"
