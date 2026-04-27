@@ -981,9 +981,10 @@ def get_reply_performance(period: str = "this_month") -> str:
         SELECT COUNT(*) AS cnt,
                COALESCE(SUM(o.total_amount), 0) AS value
         FROM orders o
-        LEFT JOIN reply r ON r.order_id = o.id
+        LEFT JOIN reply r ON r.order_id = o.id AND r.deleted_at IS NULL
         WHERE o.deleted_at IS NULL
           AND o.payment_complete = 1
+          AND o.status = 'pending'
           AND r.id IS NULL
           AND o.created_at >= %s AND o.created_at < %s
     """, (start.strftime("%Y-%m-%d %H:%M:%S"), end.strftime("%Y-%m-%d %H:%M:%S")))[0]

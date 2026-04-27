@@ -229,8 +229,8 @@ async def get_dashboard(user: dict = Depends(get_current_user)):
         # Unreplied paid orders
         cur.execute("""
             SELECT COUNT(*) cnt FROM orders o
-            LEFT JOIN reply r ON r.order_id = o.id
-            WHERE o.payment_complete=1 AND o.deleted_at IS NULL AND r.id IS NULL
+            LEFT JOIN reply r ON r.order_id = o.id AND r.deleted_at IS NULL
+            WHERE o.payment_complete=1 AND o.status='pending' AND o.deleted_at IS NULL AND r.id IS NULL
         """)
         unreplied = cur.fetchone()
 
