@@ -1,5 +1,5 @@
 # bridge.py
-from fastapi import FastAPI, WebSocket, Depends, HTTPException, UploadFile, File, Form, Request
+from fastapi import FastAPI, APIRouter, WebSocket, Depends, HTTPException, UploadFile, File, Form, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import StreamingResponse
@@ -29,6 +29,8 @@ VOICE_TTL   = int(os.getenv("VOICE_TTL_DAYS", "30")) * 86400
 
 os.makedirs(VOICE_DIR, exist_ok=True)
 app.mount("/storage/voice", StaticFiles(directory=VOICE_DIR), name="voice")
+
+router = APIRouter(prefix="/api")
 
 # CORS from env — set your production domain in ALLOWED_ORIGINS
 _origins = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "http://localhost:8000,http://127.0.0.1:8000").split(",")]
@@ -60,7 +62,7 @@ class LoginRequest(BaseModel):
 class ConversationRequest(BaseModel):
     chat_session_id : int
 
-@app.post("/auth/login")
+@router.post("/auth/login")
 @limiter.limit("10/minute")
 async def auth_login(request: Request, req: LoginRequest):
     loop   = asyncio.get_event_loop()
@@ -69,11 +71,11 @@ async def auth_login(request: Request, req: LoginRequest):
         raise HTTPException(status_code=401, detail="Invalid credentials")
     return {"token": result["token"], "user": {"id": result["user_id"], "name": result["name"]}}
 
-@app.get("/auth/me")
+@router.get("/auth/me")
 async def auth_me(user: dict = Depends(get_current_user)):
     return {"user": user}
 
-@app.post("/auth/get-conversation")
+@router.post("/auth/get-conversation")
 async def get_conversation(
     req:         ConversationRequest,
     credentials: HTTPAuthorizationCredentials = Depends(security),
@@ -88,12 +90,12 @@ async def get_conversation(
     return {"messages": messages}
 
 # ── WebSocket — just delegates to handler ─────────────────────
-@app.websocket("/ws")
+@app.websocket("/api/ws")
 async def websocket_route(websocket: WebSocket):
     await handle_websocket(websocket)
 
 # ── Voice: transcribe + save audio ───────────────────────────
-@app.post("/transcribe")
+@router.post("/transcribe")
 @limiter.limit("30/minute")
 async def transcribe(
     request:    Request,
@@ -185,7 +187,7 @@ def _cleanup_old_voice_files():
                 pass
 
 # ── Dashboard endpoint ────────────────────────────────────────
-@app.get("/api/dashboard")
+@router.get("/dashboard")
 async def get_dashboard(user: dict = Depends(get_current_user)):
     from mcp_app.db import get_connection
     from datetime import datetime, timedelta
@@ -307,7 +309,7 @@ class ReplyRequest(BaseModel):
     order_ref: str
     answer:    str
 
-@app.post("/api/reply")
+@router.post("/reply")
 async def reply_to_order(
     req:  ReplyRequest,
     user: dict = Depends(get_current_user),
@@ -361,7 +363,7 @@ class TTSRequest(BaseModel):
     text:  str
     voice: str = "my-MM-ThihaNeural"
 
-@app.post("/api/tts")
+@router.post("/tts")
 async def text_to_speech(
     req:  TTSRequest,
     user: dict = Depends(get_current_user),
@@ -402,3 +404,5 @@ async def text_to_speech(
         media_type="audio/mpeg",
         headers={"Content-Disposition": "inline"},
     )
+
+app.include_router(router)
