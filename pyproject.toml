@@ -26,6 +26,7 @@ dependencies = [
     "mysql-connector-python>=9.6.0",
     "edge-tts>=7.2.0",
     "unicorn>=2.1.4",
+    "psutil>=6.1.1",
     "slowapi==0.1.9",
     "amazon-transcribe==0.6.2",
 ]

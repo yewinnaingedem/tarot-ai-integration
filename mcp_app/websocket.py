@@ -130,10 +130,12 @@ async def handle_websocket(websocket: WebSocket):
                 )
                 history = new_session_history()
                 print(f"✅ New session {session_id} created")
+                import time as _time
                 await _safe_send(websocket, {
                     "event":      "session_created",
                     "session_id": session_id,
                     "title":      message[:50],
+                    "timestamp":  int(_time.time() * 1000),
                 })
 
             # ── Store user message to DB ──────────────────────

@@ -1,11 +1,23 @@
 # mcp_app/agent/host.py
 import json
+import asyncio
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from mcp_app.agent.antropic import Anthropic
 
 agent: Anthropic = None
+
+
+async def _metrics_loop():
+    from mcp_app.mcp_tools.server_monitor import log_metrics_snapshot
+    while True:
+        try:
+            log_metrics_snapshot()
+        except Exception:
+            pass
+        await asyncio.sleep(5 * 60)  # every 5 minutes
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -16,10 +28,13 @@ async def lifespan(app: FastAPI):
     import mcp_app.mcp_tools.coupon
     import mcp_app.mcp_tools.report
     import mcp_app.mcp_tools.analyise
+    import mcp_app.mcp_tools.server_monitor
 
     agent = Anthropic()
     await agent._connect_mcp()
+    task = asyncio.create_task(_metrics_loop())
     yield
+    task.cancel()
     await agent.close()
 
 app = FastAPI(title="Tarot AI Agent Host", lifespan=lifespan)
