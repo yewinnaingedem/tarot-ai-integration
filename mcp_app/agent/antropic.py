@@ -118,6 +118,11 @@ class Anthropic:
             "role", "permission", "access", "user", "admin user", "who can",
             "log", "error", "bug", "crash", "exception", "debug", "issue", "broken",
             "laravel", "backend", "system", "check log", "what went wrong",
+            # server monitoring
+            "server", "cpu", "memory", "ram", "disk", "traffic", "load",
+            "process", "service", "uptime", "running", "down", "slow",
+            "monitor", "status", "health", "network", "connection",
+            "ဆာဗာ", "မမ်မိုရီ", "ဒစ်", "ချိတ်ဆက်",
         ]
         # Web search keywords
         web_keywords = [
@@ -339,6 +344,9 @@ class Anthropic:
         "list_log_dates":            "Log ရက်စွဲများ ကြည့်နေပါတယ်...",
         "reply_to_order":            "✍️ Order ကို reply လုပ်နေပါတယ်...",
         "batch_reply_orders":        "✍️ Order များကို reply လုပ်နေပါတယ်...",
+        "check_server_status":       "🖥️ Server status စစ်နေပါတယ်...",
+        "check_top_processes":       "🔍 Process များ စစ်နေပါတယ်...",
+        "get_server_metrics_history":"📊 Server metrics ကြည့်နေပါတယ်...",
     }
 
     # ── Streaming chat (for WebSocket) ────────────────────────
