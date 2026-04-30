@@ -20,6 +20,10 @@ async def get_agent() -> Anthropic:
         import mcp_app.mcp_tools.server_monitor
         _agent = Anthropic()
         await _agent._connect_mcp()
+        # start background metrics recording
+        import asyncio as _asyncio
+        from mcp_app.agent.host import _metrics_loop
+        _asyncio.create_task(_metrics_loop())
     return _agent
 
 async def get_google_agent() -> GoogleAgent:

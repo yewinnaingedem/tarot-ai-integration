@@ -7,15 +7,19 @@ from fastapi.responses import JSONResponse
 from mcp_app.agent.antropic import Anthropic
 
 agent: Anthropic = None
+_metrics_task: asyncio.Task = None
+_last_metric_time: float = 0
 
 
 async def _metrics_loop():
+    global _last_metric_time
     from mcp_app.mcp_tools.server_monitor import log_metrics_snapshot
     while True:
         try:
             log_metrics_snapshot()
-        except Exception:
-            pass
+            _last_metric_time = asyncio.get_event_loop().time()
+        except Exception as e:
+            print(f"⚠️ metrics loop error: {e}")
         await asyncio.sleep(5 * 60)  # every 5 minutes
 
 
@@ -41,12 +45,17 @@ app = FastAPI(title="Tarot AI Agent Host", lifespan=lifespan)
 
 @app.get("/health")
 async def health():
+    import time
     tools = [t["name"] for t in agent._tools] if agent else []
+    metrics_running = _metrics_task is not None and not _metrics_task.done()
+    last_recorded = round(asyncio.get_event_loop().time() - _last_metric_time) if _last_metric_time else None
     return JSONResponse({
-        "status":       "ok",
-        "model":        agent.model if agent else "not loaded",
-        "tools_loaded": len(tools),
-        "tools":        tools,
+        "status":              "ok",
+        "model":               agent.model if agent else "not loaded",
+        "tools_loaded":        len(tools),
+        "tools":               tools,
+        "metrics_loop":        "running" if metrics_running else "stopped",
+        "last_metric_secs_ago": last_recorded,
     })
 
 @app.post("/api/chat")
