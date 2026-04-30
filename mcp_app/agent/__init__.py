@@ -17,6 +17,7 @@ async def get_agent() -> Anthropic:
         import mcp_app.mcp_tools.analyise
         import mcp_app.mcp_tools.admin
         import mcp_app.mcp_tools.logs
+        import mcp_app.mcp_tools.server_monitor
         _agent = Anthropic()
         await _agent._connect_mcp()
     return _agent
