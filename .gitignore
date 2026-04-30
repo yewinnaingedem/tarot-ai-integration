@@ -11,3 +11,4 @@ wheels/
 .env
 cloude-install.sh
 /storage/voice/
+/logs/
